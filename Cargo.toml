@@ -1,0 +1,11 @@
+[workspace]
+
+members = ["core", "utils", "app"]
+
+[workspace.package]
+name = "Setu"
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
