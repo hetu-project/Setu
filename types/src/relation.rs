@@ -1,56 +1,56 @@
-//! RelationGraph对象 - 社交关系图
+//! RelationGraph Object - Social Relationship Graph
 //! 
-//! 设计理念：
-//! - RelationGraph是SBT拥有的资源对象
-//! - 一个SBT可以有多个RelationGraph（朋友圈、工作圈等）
-//! - RelationGraph存储到其他SBT的关系
+//! Design Philosophy:
+//! - RelationGraph is a resource object owned by SBT
+//! - One SBT can have multiple RelationGraphs (friend circle, work circle, etc.)
+//! - RelationGraph stores relationships to other SBTs
 
 use serde::{Deserialize, Serialize};
 use crate::object::{Object, ObjectId, Address, generate_object_id};
 
-/// 关系边
+/// Relationship edge
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Relation {
-    /// 目标SBT的ID
+    /// Target SBT's ID
     pub target_sbt: ObjectId,
     
-    /// 关系类型
+    /// Relationship type
     pub relation_type: String,
     
-    /// 关系权重（用于算法）
+    /// Relationship weight (used for algorithms)
     pub weight: u32,
     
-    /// 创建时间
+    /// Creation time
     pub created_at: u64,
     
-    /// 元数据
+    /// Metadata
     pub metadata: std::collections::HashMap<String, String>,
 }
 
-/// 关系图数据
+/// Relationship graph data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelationGraphData {
-    /// 拥有者（SBT的ID）
+    /// Owner (SBT's ID)
     pub owner_sbt: ObjectId,
     
-    /// 图的类型/名称
+    /// Graph type/name
     pub graph_type: String,
     
-    /// 关系列表
+    /// Relationship list
     pub relations: Vec<Relation>,
     
-    /// 创建时间
+    /// Creation time
     pub created_at: u64,
     
-    /// 更新时间
+    /// Update time
     pub updated_at: u64,
 }
 
-/// RelationGraph类型别名
+/// RelationGraph type alias
 pub type RelationGraph = Object<RelationGraphData>;
 
 impl RelationGraphData {
-    /// 创建新的关系图
+    /// Create a new relationship graph
     pub fn new(owner_sbt: ObjectId, graph_type: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -66,7 +66,7 @@ impl RelationGraphData {
         }
     }
     
-    /// 添加关系
+    /// Add relationship
     pub fn add_relation(&mut self, target_sbt: ObjectId, relation_type: String, weight: u32) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -85,7 +85,7 @@ impl RelationGraphData {
         self.touch();
     }
     
-    /// 移除关系
+    /// Remove relationship
     pub fn remove_relation(&mut self, target_sbt: &ObjectId, relation_type: &str) -> bool {
         let initial_len = self.relations.len();
         self.relations.retain(|r| {
@@ -100,7 +100,7 @@ impl RelationGraphData {
         }
     }
     
-    /// 获取指定类型的所有关系
+    /// Get all relationships of specified type
     pub fn get_relations_by_type(&self, relation_type: &str) -> Vec<&Relation> {
         self.relations
             .iter()
@@ -108,14 +108,14 @@ impl RelationGraphData {
             .collect()
     }
     
-    /// 获取到指定目标的关系
+    /// Get relationship to specified target
     pub fn get_relation(&self, target_sbt: &ObjectId, relation_type: &str) -> Option<&Relation> {
         self.relations
             .iter()
             .find(|r| r.target_sbt == *target_sbt && r.relation_type == relation_type)
     }
     
-    /// 更新关系权重
+    /// Update relationship weight
     pub fn update_weight(&mut self, target_sbt: &ObjectId, relation_type: &str, weight: u32) -> bool {
         if let Some(relation) = self.relations
             .iter_mut()
@@ -129,12 +129,12 @@ impl RelationGraphData {
         }
     }
     
-    /// 获取关系数量
+    /// Get relationship count
     pub fn relation_count(&self) -> usize {
         self.relations.len()
     }
     
-    /// 获取指定类型的关系数量
+    /// Get relationship count by type
     pub fn relation_count_by_type(&self, relation_type: &str) -> usize {
         self.relations
             .iter()
@@ -151,24 +151,24 @@ impl RelationGraphData {
 }
 
 impl RelationGraph {
-    /// 创建新的关系图对象
+    /// Create a new relationship graph object
     pub fn new(owner_sbt: ObjectId, graph_type: String) -> Self {
         let id = generate_object_id(
             format!("graph:{}:{}", owner_sbt, graph_type).as_bytes()
         );
         let data = RelationGraphData::new(owner_sbt.clone(), graph_type);
         
-        // RelationGraph的owner是SBT的ID（以字符串形式）
+        // RelationGraph's owner is the SBT's ID (in string form)
         Object::new_owned(id, &owner_sbt, data)
     }
 }
 
-/// 辅助函数：创建社交关系图
+/// Helper function: create social relationship graph
 pub fn create_social_graph(owner_sbt: ObjectId) -> RelationGraph {
     RelationGraph::new(owner_sbt, "social".to_string())
 }
 
-/// 辅助函数：创建专业关系图
+/// Helper function: create professional relationship graph
 pub fn create_professional_graph(owner_sbt: ObjectId) -> RelationGraph {
     RelationGraph::new(owner_sbt, "professional".to_string())
 }

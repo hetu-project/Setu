@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 
-// 使用独立的VLC库
+// Use independent VLC library
 pub use setu_vlc::{VectorClock, VLCSnapshot};
 
 // Placeholder types (to be replaced with actual implementations)

@@ -1,31 +1,31 @@
-//! Coin对象 - 可转移的资产
+//! Coin Object - Transferable Asset
 //! 
-//! 设计理念：
-//! - Coin是独立的对象，可以被SBT拥有
-//! - 支持split、merge、transfer等操作
-//! - Balance是值类型，不是对象
+//! Design Philosophy:
+//! - Coin is an independent object that can be owned by SBT
+//! - Supports operations like split, merge, transfer
+//! - Balance is a value type, not an object
 
 use serde::{Deserialize, Serialize};
 use crate::object::{Object, ObjectId, Address, generate_object_id};
 
-/// Balance是值类型，封装代币数量
+/// Balance is a value type that encapsulates token amount
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Balance {
     value: u64,
 }
 
 impl Balance {
-    /// 创建新的Balance
+    /// Create a new Balance
     pub fn new(value: u64) -> Self {
         Self { value }
     }
     
-    /// 获取余额值
+    /// Get the balance value
     pub fn value(&self) -> u64 {
         self.value
     }
     
-    /// 提取指定数量，返回提取的Balance
+    /// Withdraw a specified amount, returns the withdrawn Balance
     pub fn withdraw(&mut self, amount: u64) -> Result<Balance, String> {
         if self.value < amount {
             return Err(format!(
@@ -37,34 +37,34 @@ impl Balance {
         Ok(Balance::new(amount))
     }
     
-    /// 存入Balance
+    /// Deposit Balance
     pub fn deposit(&mut self, balance: Balance) -> Result<(), String> {
         self.value = self.value.checked_add(balance.value)
             .ok_or("Balance overflow")?;
         Ok(())
     }
     
-    /// 销毁Balance（用于merge时）
+    /// Destroy Balance (used for merging)
     pub fn destroy(self) -> u64 {
         self.value
     }
 }
 
-/// Coin对象数据 - 代表可转移的代币
+/// Coin object data - represents transferable tokens
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoinData {
     pub balance: Balance,
 }
 
-/// Coin类型别名
+/// Coin type alias
 pub type Coin = Object<CoinData>;
 
 impl Coin {
-    /// 创建新的Coin对象
+    /// Create a new Coin object
     /// 
-    /// # 参数
-    /// - `owner`: Coin的拥有者（通常是SBT的ObjectId）
-    /// - `value`: 初始余额
+    /// # Parameters
+    /// - `owner`: Owner of the Coin (usually an SBT's ObjectId)
+    /// - `value`: Initial balance
     pub fn new(owner: Address, value: u64) -> Self {
         let id = generate_object_id(format!("coin:{}:{}", owner, value).as_bytes());
         let data = CoinData {
@@ -73,19 +73,19 @@ impl Coin {
         Object::new_owned(id, &owner, data)
     }
     
-    /// 获取余额
+    /// Get balance
     pub fn value(&self) -> u64 {
         self.data.balance.value()
     }
     
-    /// 拆分出指定数量到新Coin
+    /// Split a specified amount into a new Coin
     /// 
-    /// # 参数
-    /// - `amount`: 要拆分的数量
-    /// - `new_owner`: 新Coin的拥有者
+    /// # Parameters
+    /// - `amount`: Amount to split
+    /// - `new_owner`: Owner of the new Coin
     /// 
-    /// # 返回
-    /// 返回新创建的Coin对象
+    /// # Returns
+    /// Returns the newly created Coin object
     pub fn split(&mut self, amount: u64, new_owner: Address) -> Result<Coin, String> {
         let withdrawn = self.data.balance.withdraw(amount)?;
         let new_coin = Coin::new(new_owner, withdrawn.value());
@@ -93,27 +93,27 @@ impl Coin {
         Ok(new_coin)
     }
     
-    /// 合并另一个Coin到当前Coin
+    /// Merge another Coin into the current Coin
     /// 
-    /// # 参数
-    /// - `other`: 要合并的Coin对象
+    /// # Parameters
+    /// - `other`: The Coin object to merge
     pub fn merge(&mut self, other: Coin) -> Result<(), String> {
         self.data.balance.deposit(other.data.balance)?;
         self.increment_version();
         Ok(())
     }
     
-    /// 转移Coin的所有权
+    /// Transfer ownership of the Coin
     /// 
-    /// # 参数
-    /// - `new_owner`: 新的拥有者
+    /// # Parameters
+    /// - `new_owner`: New owner
     pub fn transfer(&mut self, new_owner: Address) {
         self.metadata.owner = Some(new_owner);
         self.increment_version();
     }
 }
 
-/// 辅助函数：创建Coin
+/// Helper function: create Coin
 pub fn create_coin(owner: Address, value: u64) -> Coin {
     Coin::new(owner, value)
 }
@@ -153,7 +153,7 @@ mod tests {
         
         assert_eq!(coin.value(), 1000);
         assert_eq!(coin.metadata.owner.as_ref().unwrap(), &owner);
-        assert_eq!(coin.metadata.version, 1); // 初始版本是1
+        assert_eq!(coin.metadata.version, 1); // Initial version is 1
     }
     
     #[test]
@@ -166,8 +166,8 @@ mod tests {
         
         assert_eq!(coin.value(), 700);
         assert_eq!(new_coin.value(), 300);
-        assert_eq!(coin.metadata.version, 2); // 操作后版本+1
-        assert_eq!(new_coin.metadata.version, 1); // 新创建的对象版本为1
+        assert_eq!(coin.metadata.version, 2); // Version incremented after operation
+        assert_eq!(new_coin.metadata.version, 1); // Newly created object has version 1
         assert_eq!(new_coin.metadata.owner.as_ref().unwrap(), &new_owner);
     }
     
@@ -189,7 +189,7 @@ mod tests {
         coin1.merge(coin2).unwrap();
         
         assert_eq!(coin1.value(), 1500);
-        assert_eq!(coin1.metadata.version, 2); // 操作后版本+1
+        assert_eq!(coin1.metadata.version, 2); // Version incremented after operation
     }
     
     #[test]
@@ -201,6 +201,6 @@ mod tests {
         coin.transfer(new_owner.clone());
         
         assert_eq!(coin.metadata.owner.as_ref().unwrap(), &new_owner);
-        assert_eq!(coin.metadata.version, 2); // 操作后版本+1
+        assert_eq!(coin.metadata.version, 2); // Version incremented after operation
     }
 }

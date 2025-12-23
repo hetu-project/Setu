@@ -1,9 +1,9 @@
-//! SBTView - 应用层聚合视图
+//! SBTView - Application Layer Aggregated View
 //! 
-//! 设计理念：
-//! - SBTView是应用层的概念，不是链上对象
-//! - 聚合SBT + 其拥有的所有资源（Coins、RelationGraphs）
-//! - 提供便捷的查询接口和计算字段
+//! Design Philosophy:
+//! - SBTView is an application layer concept, not an on-chain object
+//! - Aggregates SBT + all resources it owns (Coins, RelationGraphs)
+//! - Provides convenient query interfaces and computed fields
 
 use serde::{Deserialize, Serialize};
 use crate::{
@@ -13,35 +13,35 @@ use crate::{
     relation::RelationGraph,
 };
 
-/// SBT聚合视图 - 代表一个完整的数字身份及其资源
+/// SBT aggregated view - represents a complete digital identity and its resources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SBTView {
-    /// SBT对象（身份）
+    /// SBT object (identity)
     pub sbt: SBT,
     
-    /// 拥有的所有Coin对象
+    /// All owned Coin objects
     pub coins: Vec<Coin>,
     
-    /// 拥有的所有RelationGraph对象
+    /// All owned RelationGraph objects
     pub graphs: Vec<RelationGraph>,
     
-    // ========== 计算字段 ==========
+    // ========== Computed Fields ==========
     
-    /// 总余额（所有Coin的sum）
+    /// Total balance (sum of all Coins)
     pub total_balance: u64,
     
-    /// Coin数量
+    /// Coin count
     pub coin_count: usize,
     
-    /// 关系图数量
+    /// Relationship graph count
     pub graph_count: usize,
     
-    /// 总关系数
+    /// Total relationship count
     pub total_relations: usize,
 }
 
 impl SBTView {
-    /// 从SBT和资源构建视图
+    /// Build view from SBT and resources
     pub fn new(sbt: SBT, coins: Vec<Coin>, graphs: Vec<RelationGraph>) -> Self {
         let total_balance = coins.iter().map(|c| c.value()).sum();
         let coin_count = coins.len();
@@ -61,34 +61,34 @@ impl SBTView {
         }
     }
     
-    /// 获取SBT的ID
+    /// Get SBT's ID
     pub fn sbt_id(&self) -> &ObjectId {
         &self.sbt.metadata.id
     }
     
-    /// 获取Address
+    /// Get Address
     pub fn address(&self) -> &Address {
         &self.sbt.data.owner
     }
     
-    /// 获取显示名称
+    /// Get display name
     pub fn display_name(&self) -> Option<&String> {
         self.sbt.data.display_name.as_ref()
     }
     
-    /// 获取信誉分数
+    /// Get reputation score
     pub fn reputation(&self) -> u64 {
         self.sbt.data.reputation_score
     }
     
-    /// 获取指定类型的关系图
+    /// Get relationship graph by type
     pub fn get_graph_by_type(&self, graph_type: &str) -> Option<&RelationGraph> {
         self.graphs
             .iter()
             .find(|g| g.data.graph_type == graph_type)
     }
     
-    /// 获取指定类型的所有关系图
+    /// Get all relationship graphs of specified type
     pub fn get_graphs_by_type(&self, graph_type: &str) -> Vec<&RelationGraph> {
         self.graphs
             .iter()
@@ -96,17 +96,17 @@ impl SBTView {
             .collect()
     }
     
-    /// 获取社交关系图
+    /// Get social relationship graph
     pub fn social_graph(&self) -> Option<&RelationGraph> {
         self.get_graph_by_type("social")
     }
     
-    /// 获取专业关系图
+    /// Get professional relationship graph
     pub fn professional_graph(&self) -> Option<&RelationGraph> {
         self.get_graph_by_type("professional")
     }
     
-    /// 按关系类型统计关系数量
+    /// Count relationships by relation type
     pub fn count_relations_by_type(&self, relation_type: &str) -> usize {
         self.graphs
             .iter()
@@ -114,7 +114,7 @@ impl SBTView {
             .sum()
     }
     
-    /// 获取所有关注的SBT IDs
+    /// Get all followed SBT IDs
     pub fn following_sbts(&self) -> Vec<ObjectId> {
         self.graphs
             .iter()
@@ -123,12 +123,12 @@ impl SBTView {
             .collect()
     }
     
-    /// 检查是否有足够余额
+    /// Check if has sufficient balance
     pub fn has_balance(&self, amount: u64) -> bool {
         self.total_balance >= amount
     }
     
-    /// 获取可用于支付的Coin列表（按余额排序）
+    /// Get list of Coins available for payment (sorted by balance)
     pub fn get_payable_coins(&self, amount: u64) -> Option<Vec<&Coin>> {
         let mut sorted_coins: Vec<&Coin> = self.coins.iter().collect();
         sorted_coins.sort_by(|a, b| b.value().cmp(&a.value()));
@@ -208,20 +208,20 @@ mod tests {
         
         let view = SBTView::new(sbt, coins, vec![]);
         
-        // 需要800，应该返回[1000]
+        // Need 800, should return [1000]
         let payable = view.get_payable_coins(800);
         assert!(payable.is_some());
         let coins = payable.unwrap();
         assert_eq!(coins.len(), 1);
         assert_eq!(coins[0].value(), 1000);
         
-        // 需要1200，应该返回[1000, 500]
+        // Need 1200, should return [1000, 500]
         let payable = view.get_payable_coins(1200);
         assert!(payable.is_some());
         let coins = payable.unwrap();
         assert_eq!(coins.len(), 2);
         
-        // 需要2000，余额不足
+        // Need 2000, insufficient balance
         let payable = view.get_payable_coins(2000);
         assert!(payable.is_none());
     }

@@ -5,13 +5,13 @@ pub mod node;
 pub mod object;
 
 // ========== New Object Model ==========
-pub mod coin;        // 新增：Coin对象
-pub mod sbt;         // 重构：SBT对象
-pub mod relation;    // 重构：RelationGraph对象
-pub mod sbt_view;    // 新增：SBT聚合视图
+pub mod coin;        // New: Coin object
+pub mod sbt;         // Refactored: SBT object
+pub mod relation;    // Refactored: RelationGraph object
+pub mod sbt_view;    // New: SBT aggregated view
 
-// ========== Deprecated (向后兼容) ==========
-// TODO: 如果需要Account向后兼容，实现简化的account模块
+// ========== Deprecated (Backward Compatibility) ==========
+// TODO: If Account backward compatibility is needed, implement a simplified account module
 // #[deprecated(note = "Account concept removed. Use SBT as identity instead.")]
 // pub mod account;
 
@@ -26,23 +26,23 @@ pub use setu_vlc::{VectorClock, VLCSnapshot};
 // ========== New Object Model Exports ==========
 pub use object::{Object, ObjectId, Address, ObjectType, ObjectMetadata, Ownership};
 
-// Coin相关
+// Coin related
 pub use coin::{Coin, Balance, create_coin};
 
-// SBT相关
+// SBT related
 pub use sbt::{SBT, SBTData, Credential, create_sbt, create_personal_sbt, create_organization_sbt};
 
-// RelationGraph相关  
+// RelationGraph related
 pub use relation::{
     RelationGraph, RelationGraphData, Relation,
     create_social_graph, create_professional_graph,
 };
 
-// 聚合视图
+// Aggregated views
 pub use sbt_view::SBTView;
 
-// ========== Deprecated Types (向后兼容) - 暂时注释 ==========
-// TODO: 如果需要向后兼容，实现简化的account模块
+// ========== Deprecated Types (Backward Compatibility) - Temporarily Commented ==========
+// TODO: If backward compatibility is needed, implement a simplified account module
 // #[deprecated(note = "Use SBT instead of Account")]
 // pub use account::{AccountData, create_account};
 //
