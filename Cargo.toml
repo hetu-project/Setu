@@ -3,11 +3,10 @@ members = [
     "types",
     "crates/setu-vlc",        # VLC Hybrid Logical Clock Library
     "crates/core-types",
+    "crates/setu-core",       # Shared core library
     "crates/setu-keys",       # Cryptographic key management
     "crates/setu-network-anemo", # Anemo-based P2P network (production)
     "consensus",
-    "storage",
-    "setu-solver",
     "setu-validator",
 ]
 resolver = "2"
