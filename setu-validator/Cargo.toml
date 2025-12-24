@@ -3,4 +3,20 @@ name = "setu-validator"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "setu-validator"
+path = "src/main.rs"
+
 [dependencies]
+# Internal dependencies
+setu-core = { path = "../crates/setu-core" }
+setu-types = { path = "../types" }
+core-types = { path = "../crates/core-types" }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Utilities
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
