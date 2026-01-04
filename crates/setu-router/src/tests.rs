@@ -13,6 +13,8 @@ fn create_test_transfer(id: &str, resources: Vec<String>) -> Transfer {
         resources,
         vlc: Vlc::new(),
         power: 0,
+        preferred_solver: None,
+        shard_id: None,
     }
 }
 

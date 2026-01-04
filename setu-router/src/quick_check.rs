@@ -128,6 +128,8 @@ mod tests {
             resources: vec!["alice".to_string()],
             vlc,
             power: 10,
+            preferred_solver: None,
+            shard_id: None,
         }
     }
     

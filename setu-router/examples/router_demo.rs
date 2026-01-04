@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
         load_balancing_strategy: LoadBalancingStrategy::RoundRobin,
         quick_check_timeout_ms: 100,
         enable_resource_routing: true,
+        routing_strategy: setu_router::RoutingStrategy::ResourceAffinityFirst,
     };
 
     // Create router
@@ -133,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
         resources: vec!["alice".to_string()],
         vlc: vlc1,
         power: 10,
+        preferred_solver: None,
+        shard_id: None,
     };
     transfer_tx.send(transfer1)?;
     
@@ -148,6 +151,8 @@ async fn main() -> anyhow::Result<()> {
         resources: vec!["charlie".to_string()],
         vlc: vlc2,
         power: 20,
+        preferred_solver: None,
+        shard_id: None,
     };
     transfer_tx.send(transfer2)?;
     
@@ -163,6 +168,8 @@ async fn main() -> anyhow::Result<()> {
         resources: vec!["eve".to_string()],
         vlc: vlc3,
         power: 30,
+        preferred_solver: None,
+        shard_id: None,
     };
     transfer_tx.send(transfer3)?;
     
@@ -178,6 +185,8 @@ async fn main() -> anyhow::Result<()> {
         resources: vec!["grace".to_string()],
         vlc: vlc4,
         power: 40,
+        preferred_solver: None,
+        shard_id: None,
     };
     transfer_tx.send(transfer4)?;
     
