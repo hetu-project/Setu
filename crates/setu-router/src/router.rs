@@ -9,9 +9,9 @@ use tracing::{debug, info};
 use core_types::Transfer;
 
 use crate::error::RouterError;
-use crate::shard::DEFAULT_SHARD_ID;
+use crate::types::DEFAULT_SHARD_ID;
 use crate::solver::{SolverId, SolverInfo, SolverRegistry};
-use crate::strategy::{ConsistentHashStrategy, LoadBalancedStrategy, RoutingStrategy};
+use crate::strategy::{ConsistentHashStrategy, LoadBalancedStrategy, SolverStrategy};
 
 /// Router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
