@@ -118,8 +118,28 @@ impl VectorClock {
     }
     
     /// Check if two vector clocks are concurrent (no causal relationship)
+    ///
+    /// Two clocks are concurrent iff neither happens-before the other and they
+    /// are not causally equal. This is decided directly by scanning the union of
+    /// nodes with implicit-zero semantics (a missing node is treated as `0`),
+    /// so clocks that differ only by explicit zero entries (e.g. `{a:0}` vs `{}`)
+    /// are correctly treated as equal rather than concurrent.
     pub fn is_concurrent(&self, other: &VectorClock) -> bool {
-        !self.happens_before(other) && !other.happens_before(self) && self != other
+        let mut self_greater = false;
+        let mut other_greater = false;
+        for node_id in self.clocks.keys().chain(other.clocks.keys()) {
+            let s = self.get(node_id);
+            let o = other.get(node_id);
+            if s > o {
+                self_greater = true;
+            } else if s < o {
+                other_greater = true;
+            }
+            if self_greater && other_greater {
+                return true;
+            }
+        }
+        self_greater && other_greater
     }
     
     /// Get all node IDs
@@ -317,5 +337,67 @@ impl VLCSnapshot {
 impl Default for VLCSnapshot {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod is_concurrent_tests {
+    use super::*;
+
+    #[test]
+    fn causally_equal_clocks_are_not_concurrent_regression() {
+        // Regression for the explicit-zero bug: {a:0} and {} are the same causal
+        // state and must NOT be reported as concurrent.
+        let seeded = VectorClock::with_node("a".to_string()); // {a:0}
+        let empty = VectorClock::new(); // {}
+        assert!(!seeded.is_concurrent(&empty));
+        assert!(!empty.is_concurrent(&seeded));
+
+        // {n:3} vs {n:3, m:0} — equal up to an implicit zero.
+        let mut x = VectorClock::new();
+        x.set("n", 3);
+        let mut y = VectorClock::new();
+        y.set("n", 3);
+        y.set("m", 0);
+        assert!(!x.is_concurrent(&y));
+        assert!(!y.is_concurrent(&x));
+    }
+
+    #[test]
+    fn genuinely_divergent_clocks_are_still_concurrent() {
+        let mut a = VectorClock::new();
+        a.set("n1", 2);
+        let mut b = VectorClock::new();
+        b.set("n2", 2);
+        assert!(a.is_concurrent(&b));
+        assert!(b.is_concurrent(&a));
+    }
+
+    #[test]
+    fn ordered_clocks_are_not_concurrent() {
+        let mut a = VectorClock::new();
+        a.set("n1", 1);
+        let mut b = VectorClock::new();
+        b.set("n1", 2);
+        assert!(!a.is_concurrent(&b));
+        assert!(!b.is_concurrent(&a));
+    }
+
+    #[test]
+    fn is_concurrent_is_symmetric_over_mixed_cases() {
+        let mut a = VectorClock::new();
+        a.set("x", 5);
+        a.set("y", 1);
+        let mut b = VectorClock::new();
+        b.set("x", 2);
+        b.set("y", 4);
+        // x: a>b, y: a<b => concurrent, both directions.
+        assert_eq!(a.is_concurrent(&b), b.is_concurrent(&a));
+        assert!(a.is_concurrent(&b));
+    }
+
+    #[test]
+    fn empty_clocks_are_not_concurrent() {
+        assert!(!VectorClock::new().is_concurrent(&VectorClock::new()));
     }
 }
