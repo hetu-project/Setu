@@ -10,6 +10,7 @@ docker/
 ├── Dockerfile.solver             # Solver node Dockerfile
 ├── docker-compose.yml            # Single validator + multi-solver setup
 ├── docker-compose.multi-validator.yml  # Multi-validator setup (for consensus testing)
+├── docker-compose.subnet-override.yml  # Override: multi-subnet/shard solver testing (use with -f)
 ├── .dockerignore                 # Docker build ignore file
 ├── .env.example                  # Environment variables example
 ├── scripts/                      # Docker management scripts
@@ -179,6 +180,32 @@ Restore volume:
 docker run --rm -v validator-data:/data -v $(pwd):/backup alpine tar xzf /backup/validator-backup.tar.gz -C /
 ```
 
+## Resource Requirements
+
+The table below is general starting-point guidance for local/CI sizing, not
+numbers benchmarked against Setu's own workload -- treat it as a floor to
+tune from, and please open an issue/PR if you have real measurements to
+contribute.
+
+| Node | Role | Dev / CI minimum | Suggested starting point (prod) |
+|------|------|-------------------|----------------------------------|
+| Validator | Consensus (DAG-BFT) + RocksDB storage | 2 vCPU / 4 GB | 4-8 vCPU / 8-16 GB, SSD-backed |
+| Solver (Mock TEE, dev) | Task execution, no real enclave | 1-2 vCPU / 2 GB | n/a (dev/CI only) |
+| Solver (Nitro Enclave, prod) | Task execution inside AWS Nitro Enclave | n/a | Enclave-capable EC2 instance (e.g. `m5.xlarge` or larger) with **2+ vCPU / 4+ GB reserved for the enclave itself**, in addition to normal host-side solver overhead |
+
+Notes:
+- AWS Nitro Enclaves carve out dedicated vCPUs and memory from the parent
+  instance via `/etc/nitro_enclaves/allocator.yaml` -- that allocation is
+  reserved and unavailable to the rest of the host, so budget it on top of
+  normal solver process overhead, not instead of it.
+- These are illustrative starting points for capacity planning, not
+  Setu-specific benchmarks. `setu-benchmark` (see the main project README's
+  Performance section) can help you produce real numbers for your own
+  hardware.
+- For multi-validator / multi-solver topologies (see Deployment Scenarios
+  below), multiply per-node minimums by node count and add headroom for P2P
+  traffic.
+
 ## Deployment Scenarios
 
 ### Scenario 1: Development (Single Node)
@@ -231,6 +258,30 @@ Example production config (needs to be created):
 ```bash
 docker-compose -f docker/docker-compose.prod.yml up -d
 ```
+
+### Scenario 5: Multi-Subnet / Shard Testing (Override)
+
+Layer extra, shard-tagged solvers on top of the multi-validator stack using
+an override file, instead of hand-writing a new compose file from scratch:
+
+```bash
+docker-compose \
+  -f docker/docker-compose.multi-validator.yml \
+  -f docker/docker-compose.subnet-override.yml \
+  up -d
+```
+
+Includes (on top of the base multi-validator stack):
+- 2 additional solvers (`solver-shard-a`, `solver-shard-b`), each registered
+  with a distinct `SOLVER_SHARD_ID`
+- Illustrative per-solver CPU/memory limits (see Resource Requirements above)
+- Requires Compose's `--compatibility` flag for the resource limits to be
+  enforced outside Swarm mode (see the override file's header comment)
+
+Note: subnet routing itself is still a roadmap item (see the main project
+README's "Subnet Architecture" row under Roadmap > Next) -- this override
+demonstrates topology and shard-tagged registration, not consensus-level
+subnet isolation.
 
 ## Common Issues
 

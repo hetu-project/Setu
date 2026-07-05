@@ -1,0 +1,110 @@
+# Override file for multi-subnet / multi-shard solver testing.
+#
+# Adds two extra, shard-tagged solvers on top of the existing
+# multi-validator stack (docker-compose.multi-validator.yml) so
+# contributors can exercise shard-aware solver registration without
+# hand-writing a new compose file from scratch. Subnet routing itself
+# is still a roadmap item (see README "Subnet Architecture" under
+# Roadmap > Next), so this only demonstrates topology / config, not
+# consensus-level subnet isolation.
+#
+# Usage:
+#   docker-compose \
+#     -f docker/docker-compose.multi-validator.yml \
+#     -f docker/docker-compose.subnet-override.yml \
+#     up -d
+#
+# Resource limits below are illustrative starting points, not
+# measured Setu benchmarks — see docker/README.md > "Resource
+# Requirements" for sizing rationale.
+#
+# NOTE: `deploy.resources.limits` is only enforced outside Swarm mode
+# when Compose is run with `--compatibility`, e.g.:
+#   docker-compose --compatibility -f docker/docker-compose.multi-validator.yml \
+#     -f docker/docker-compose.subnet-override.yml up -d
+
+version: '3.8'
+
+services:
+  # Give the base solver-1 an explicit resource ceiling too, so every
+  # solver in the topology is sized consistently.
+  solver-1:
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+
+  solver-shard-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.solver
+    container_name: setu-solver-shard-a
+    hostname: solver-shard-a
+    ports:
+      - "9011:9001"
+    environment:
+      - SOLVER_ID=solver-shard-a
+      - SOLVER_PORT=9001
+      - SOLVER_LISTEN_ADDR=0.0.0.0
+      - SOLVER_CAPACITY=100
+      - SOLVER_SHARD_ID=shard-a
+      - VALIDATOR_ADDRESS=validator-1
+      - VALIDATOR_HTTP_PORT=8080
+      - AUTO_REGISTER=true
+      - RUST_LOG=info,setu_solver=debug
+      - LOG_PATH=/data/log
+    volumes:
+      - solver-shard-a-data:/data
+    networks:
+      - setu-network
+    depends_on:
+      - validator-1
+      - validator-2
+      - validator-3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+
+  solver-shard-b:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.solver
+    container_name: setu-solver-shard-b
+    hostname: solver-shard-b
+    ports:
+      - "9012:9001"
+    environment:
+      - SOLVER_ID=solver-shard-b
+      - SOLVER_PORT=9001
+      - SOLVER_LISTEN_ADDR=0.0.0.0
+      - SOLVER_CAPACITY=100
+      - SOLVER_SHARD_ID=shard-b
+      - VALIDATOR_ADDRESS=validator-1
+      - VALIDATOR_HTTP_PORT=8080
+      - AUTO_REGISTER=true
+      - RUST_LOG=info,setu_solver=debug
+      - LOG_PATH=/data/log
+    volumes:
+      - solver-shard-b-data:/data
+    networks:
+      - setu-network
+    depends_on:
+      - validator-1
+      - validator-2
+      - validator-3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+
+volumes:
+  solver-shard-a-data:
+    driver: local
+  solver-shard-b-data:
+    driver: local
