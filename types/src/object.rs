@@ -420,9 +420,9 @@ impl<T: Serialize + Clone> Object<T> {
         hasher.update(b"SETU_OBJ_DIGEST:");
         hasher.update(self.metadata.id.as_bytes());
         hasher.update(&self.metadata.version.to_le_bytes());
-        if let Ok(data_bytes) = bcs::to_bytes(&self.data) {
-            hasher.update(&data_bytes);
-        }
+        let data_bytes = bcs::to_bytes(&self.data)
+            .expect("BCS serialization failed for object data — this indicates a type-level bug");
+        hasher.update(&data_bytes);
         self.metadata.digest = ObjectDigest::new(*hasher.finalize().as_bytes());
     }
 

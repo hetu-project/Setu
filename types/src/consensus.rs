@@ -88,7 +88,7 @@ impl Anchor {
         event_ids: &[EventId],
         vlc_snapshot: &VLCSnapshot,
         state_root: &str,
-        timestamp: u64,
+        _timestamp: u64,
     ) -> AnchorId {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"SETU_ANCHOR_ID:");
@@ -97,7 +97,9 @@ impl Anchor {
         }
         hasher.update(&vlc_snapshot.logical_time.to_le_bytes());
         hasher.update(state_root.as_bytes());
-        hasher.update(&timestamp.to_le_bytes());
+        // NOTE: timestamp is intentionally excluded from the ID computation.
+        // Using SystemTime::now() made anchor IDs non-deterministic across validators,
+        // breaking consensus. The event_ids + vlc + state_root already ensure uniqueness.
         hex::encode(hasher.finalize().as_bytes())
     }
 
@@ -308,14 +310,16 @@ impl ConsensusFrame {
         }
     }
 
-    fn compute_id(round: u64, anchor: &Anchor, proposer: &str, timestamp: u64) -> CFId {
+    fn compute_id(round: u64, anchor: &Anchor, proposer: &str, _timestamp: u64) -> CFId {
         let mut hasher = blake3::Hasher::new();
         // V2 domain separator: includes round to bind proposer<->round (PR-4).
         hasher.update(b"SETU_CF_ID_V2:");
         hasher.update(&round.to_le_bytes());
         hasher.update(anchor.id.as_bytes());
         hasher.update(proposer.as_bytes());
-        hasher.update(&timestamp.to_le_bytes());
+        // NOTE: timestamp is intentionally excluded from the ID computation.
+        // Using SystemTime::now() made CF IDs non-deterministic across validators,
+        // breaking consensus. The round + anchor + proposer already ensure uniqueness.
         hex::encode(hasher.finalize().as_bytes())
     }
 
@@ -332,7 +336,10 @@ impl ConsensusFrame {
     }
 
     pub fn check_quorum(&self, total_validators: usize) -> bool {
-        let threshold = (total_validators * 2) / 3 + 1;
+        // BFT quorum: ceil(2n/3). For n=3 → 2, n=4 → 3, n=6 → 4.
+        // Previous formula `(n * 2) / 3 + 1` required unanimity for n=3 (3/3),
+        // which is incorrect for BFT consensus.
+        let threshold = (total_validators * 2 + 2) / 3;
         self.approve_count() >= threshold
     }
 

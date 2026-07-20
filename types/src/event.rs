@@ -555,10 +555,10 @@ impl Event {
     ///
     /// The validator builds the genesis event deterministically
     /// (`setu-validator/src/main.rs`): empty `parent_ids`, fixed creator
-    /// `"genesis"`, `timestamp = 0`, and `logical_time = 0`. `compute_id` hashes
-    /// exactly those four inputs, so the genesis event id is a fixed,
-    /// chain-independent constant
-    /// (`691c8dd61cdc0391ae5414ce9b6ac9be3ef205ba61daa9cb58dc0b3989e0dd6d`).
+    /// `"genesis", `timestamp = 0`, and `logical_time = 0`. `compute_id` hashes
+    /// exactly those three inputs (timestamp excluded for determinism), so the
+    /// genesis event id is a fixed, chain-independent constant
+    /// (`1efb63d540602ba4b6487dd7da94ff3bdb31fd0c24e21644f9c333e550d5e8cd`).
     ///
     /// Task preparation uses this to drop the genesis parent edge from a
     /// never-moved coin before `compute_id`, preventing `ParentTooOld` once the
@@ -750,7 +750,7 @@ impl Event {
         parent_ids: &[EventId],
         vlc_snapshot: &VLCSnapshot,
         creator: &str,
-        timestamp: u64,
+        _timestamp: u64,
     ) -> EventId {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"SETU_EVENT_ID:");
@@ -759,7 +759,10 @@ impl Event {
         }
         hasher.update(&vlc_snapshot.logical_time.to_le_bytes());
         hasher.update(creator.as_bytes());
-        hasher.update(&timestamp.to_le_bytes());
+        // NOTE: timestamp is intentionally excluded from the ID computation.
+        // Using SystemTime::now() made event IDs non-deterministic across validators,
+        // breaking consensus. The VLC logical_time already provides causal ordering,
+        // and creator + parent_ids ensure uniqueness.
         hex::encode(hasher.finalize().as_bytes())
     }
     
@@ -1027,7 +1030,7 @@ mod tests {
     #[test]
     fn test_genesis_event_id_is_canonical_constant() {
         const EXPECTED: &str =
-            "691c8dd61cdc0391ae5414ce9b6ac9be3ef205ba61daa9cb58dc0b3989e0dd6d";
+            "1efb63d540602ba4b6487dd7da94ff3bdb31fd0c24e21644f9c333e550d5e8cd";
         assert_eq!(Event::genesis_event_id(), EXPECTED);
 
         // Mirror setu-validator/src/main.rs genesis construction.

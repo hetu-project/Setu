@@ -133,7 +133,7 @@ pub fn compute_global_state_root(subnet_roots: &HashMap<SubnetId, MerkleHash>) -
         return MerkleHash::zero();
     }
     
-    let entries: Vec<SubnetStateEntry> = subnet_roots
+    let mut entries: Vec<SubnetStateEntry> = subnet_roots
         .iter()
         .map(|(subnet_id, root)| {
             // Convert SubnetId to [u8; 32]
@@ -141,6 +141,10 @@ pub fn compute_global_state_root(subnet_roots: &HashMap<SubnetId, MerkleHash>) -
             SubnetStateEntry::new(subnet_bytes, *root)
         })
         .collect();
+    // Sort by subnet_id bytes for deterministic ordering across all validators.
+    // HashMap iteration order is non-deterministic, so without sorting different
+    // validators would compute different global_state_root from identical inputs.
+    entries.sort_by(|a, b| a.subnet_id.cmp(&b.subnet_id));
     
     let tree = SubnetAggregationTree::build(entries);
     tree.root()
