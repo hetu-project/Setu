@@ -1142,8 +1142,8 @@ impl UserRpcHandler for ValidatorUserHandler {
         // Forward the canonical subnet id (D1); no local side effects before
         // DAG submission succeeds or fails inside submit_transfer.
         let submit_request = SubmitTransferRequest {
-            from: request.from,
-            to: request.to,
+            from: normalized_from,
+            to: normalized_to,
             amount: amount_units,
             transfer_type: "setu".to_string(),
             resources: vec![],

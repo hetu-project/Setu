@@ -110,8 +110,12 @@ where
                         Ok(Response::new(Bytes::new()))
                     }
                     Err(e) => {
-                        tracing::warn!("Handler error: {}", e);
-                        Ok(Response::new(Bytes::new()))
+                        tracing::warn!("Handler error on route {}: {}", route, e);
+                        // Return the error as the response body instead of silently
+                        // swallowing it. Callers can detect errors by checking for
+                        // the "__HANDLER_ERROR__:" prefix.
+                        let error_body = format!("__HANDLER_ERROR__:{e}");
+                        Ok(Response::new(Bytes::from(error_body)))
                     }
                 }
             }

@@ -847,8 +847,12 @@ impl ConsensusValidator {
         let mut vs = self.validator_set.write().await;
         vs.add_validator(info.clone());
         
-        // Also register in TEE verifier if they have a public key
-        // (This would be extended in a real implementation)
+        // Also update the engine's ValidatorSet + ConsensusManager.validator_count
+        // so the new validator is visible to quorum/leader election logic.
+        // Without this, the validator exists in the local copy but is invisible
+        // to the consensus engine.
+        drop(vs);
+        self.engine.add_consensus_validator(info.clone()).await;
         
         info!(
             validator_id = %info.node.id,
