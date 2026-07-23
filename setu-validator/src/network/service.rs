@@ -2506,8 +2506,9 @@ mod tests {
 
         let response = handler.register_validator(request).await;
 
-        assert!(response.success);
-        assert_eq!(service.validator_count(), 1);
+        assert!(!response.success);
+        assert!(response.message.contains("Dynamic validator registration is disabled"));
+        assert_eq!(service.validator_count(), 0);
     }
 
     #[tokio::test]
@@ -2526,17 +2527,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_validator_submit_failure_does_not_activate_validator() {
+    async fn register_validator_rejects_unauthenticated_dynamic_membership() {
         let service = create_test_service();
         let handler = service.registration_handler();
-        service.force_next_add_event_to_dag_response(forced_submit_failure());
 
         let response = handler
             .register_validator(sample_validator_request("validator-fail"))
             .await;
 
         assert!(!response.success);
-        assert!(response.message.contains("forced submit failure"));
+        assert!(response.message.contains("Dynamic validator registration is disabled"));
         assert_eq!(service.validator_count(), 0);
     }
 

@@ -3,7 +3,7 @@
 //! Implements RegistrationHandler trait for Validator RPC.
 
 use super::service::ValidatorNetworkService;
-use super::types::{current_timestamp_millis, current_timestamp_secs, ValidatorInfo, SubnetInfo};
+use super::types::{current_timestamp_millis, current_timestamp_secs, SubnetInfo};
 use setu_rpc::{
     GetNodeStatusRequest, GetNodeStatusResponse, GetSolverListRequest, GetSolverListResponse,
     GetValidatorListRequest, GetValidatorListResponse, HeartbeatRequest, HeartbeatResponse,
@@ -13,7 +13,7 @@ use setu_rpc::{
     RegistrationHandler, SolverListItem, UnregisterRequest,
     UnregisterResponse,
 };
-use setu_types::{Event, SolverRegistration, ValidatorRegistration};
+use setu_types::{Event, SolverRegistration};
 use setu_types::registration::{SubnetRegistration, SubnetResourceLimits, TokenConfig};
 use setu_types::subnet::SubnetType;
 use std::sync::Arc;
@@ -155,93 +155,17 @@ impl RegistrationHandler for ValidatorRegistrationHandler {
             "Processing validator registration"
         );
 
-        // Create registration event
-        let vlc_time = self.service.get_vlc_time();
-        let mut vlc = setu_vlc::VectorClock::new();
-        vlc.increment(self.service.validator_id());
-        let vlc_snapshot = setu_vlc::VLCSnapshot {
-            vector_clock: vlc,
-            logical_time: vlc_time,
-            physical_time: current_timestamp_millis(),
-        };
-
-        let registration = ValidatorRegistration::new(
-            request.validator_id.clone(),
-            request.address.clone(),
-            request.port,
-            request.account_address.clone(),
-            request.public_key.clone(),
-            request.signature.clone(),
-            request.stake_amount,
-        )
-        .with_commission_rate(request.commission_rate);
-
-        let mut event = Event::validator_register(
-            registration,
-            vec![],
-            vlc_snapshot,
-            request.validator_id.clone(),
-        );
-
-        event.set_execution_result(setu_types::event::ExecutionResult {
-            success: true,
-            message: Some("Validator registration executed".to_string()),
-            state_changes: vec![setu_types::event::StateChange {
-                key: format!("validator:{}", request.validator_id),
-                old_value: None,
-                new_value: Some(
-                    format!("registered:{}:{}", request.address, request.port).into_bytes(),
-                ),
-                target_subnet: None,
-            }],
-        });
-
-        // Add event to DAG (async to support consensus submission)
-        let submit_response = self.service.add_event_to_dag(event).await;
-        if !submit_response.success {
-            warn!(
-                validator_id = %request.validator_id,
-                message = %submit_response.message,
-                "Validator registration DAG submission failed"
-            );
-            return RegisterValidatorResponse {
-                success: false,
-                message: submit_response.message,
-            };
-        }
-
-        let now = current_timestamp_secs();
-        let validator_info = ValidatorInfo {
-            validator_id: request.validator_id.clone(),
-            address: request.address.clone(),
-            port: request.port,
-            status: "online".to_string(),
-            registered_at: now,
-        };
-        self.service.add_validator(validator_info);
-
-        if let Some(cv) = self.service.consensus_validator() {
-            let peer_node_info = setu_types::NodeInfo::new_validator(
-                request.validator_id.clone(),
-                request.address.clone(),
-                request.port,
-            );
-            cv.add_peer_validator(peer_node_info).await;
-            info!(
-                "Consensus layer updated: validator {} added",
-                request.validator_id
-            );
-        }
-
-        info!(
+        // Validator membership changes quorum and leader election. This public
+        // endpoint has no authenticated authorization path, and the current
+        // registration signature placeholder is not a cryptographic proof.
+        // Accepting it would let any HTTP caller alter the local consensus set.
+        warn!(
             validator_id = %request.validator_id,
-            total_validators = self.service.validator_count(),
-            "Validator registered successfully"
+            "Rejecting unauthenticated dynamic validator registration"
         );
-
         RegisterValidatorResponse {
-            success: true,
-            message: "Validator registered successfully".to_string(),
+            success: false,
+            message: "Dynamic validator registration is disabled until authenticated governance and finalized epoch activation are implemented".to_string(),
         }
     }
 
@@ -480,10 +404,13 @@ impl RegistrationHandler for ValidatorRegistrationHandler {
                 }
             }
             NodeType::Validator => {
-                self.service.unregister_validator(&request.node_id);
+                warn!(
+                    node_id = %request.node_id,
+                    "Rejecting unauthenticated dynamic validator unregistration"
+                );
                 UnregisterResponse {
-                    success: true,
-                    message: "Validator unregistered successfully".to_string(),
+                    success: false,
+                    message: "Dynamic validator unregistration is disabled until authenticated governance and finalized epoch activation are implemented".to_string(),
                 }
             }
         }
@@ -741,4 +668,3 @@ mod solver_routable_tests {
         );
     }
 }
-
