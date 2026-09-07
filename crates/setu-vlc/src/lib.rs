@@ -265,9 +265,6 @@ impl VLCSnapshot {
         // Update logical time
         self.logical_time = self.logical_time.max(other.logical_time) + 1;
         
-        // Increment local node's vector clock
-        self.vector_clock.increment(local_node_id);
-        
         // Update physical time
         self.physical_time = Self::current_physical_time();
     }
