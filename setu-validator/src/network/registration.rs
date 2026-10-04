@@ -71,6 +71,32 @@ impl RegistrationHandler for ValidatorRegistrationHandler {
             warn!(solver_id = %request.solver_id, "Solver already registered, will update");
         }
 
+        // Auth: solver must prove ownership of the claimed public key.
+        // Previously nothing was verified: anyone could register phantom
+        // solvers, and with no staleness eviction those entries persist,
+        // blackholing routed tasks indefinitely.
+        {
+            let auth_check = SolverRegistration::new(
+                request.solver_id.clone(),
+                request.address.clone(),
+                request.port,
+                request.account_address.clone(),
+                request.public_key.clone(),
+                request.signature.clone(),
+            );
+            if !auth_check.verify_signature() {
+                warn!(
+                    solver_id = %request.solver_id,
+                    "Rejecting solver registration: invalid ownership signature"
+                );
+                return RegisterSolverResponse {
+                    success: false,
+                    message: "Invalid registration signature: must prove ownership of the claimed public key".to_string(),
+                    assigned_id: None,
+                };
+            }
+        }
+
         // Create registration event
         let vlc_time = self.service.get_vlc_time();
         let mut vlc = setu_vlc::VectorClock::new();
@@ -154,6 +180,37 @@ impl RegistrationHandler for ValidatorRegistrationHandler {
             stake_amount = request.stake_amount,
             "Processing validator registration"
         );
+
+        // Auth: the request must carry a valid secp256k1 signature over the
+        // claimed identity (validator_id, address, port, account_address,
+        // stake_amount, public_key), verifiable by the claimed public_key.
+        // Previously NOTHING was verified here: anyone could register an
+        // arbitrary validator identity straight into the live consensus set
+        // via add_peer_validator below (open Sybil/quorum-poisoning path).
+        // NOTE: commission_rate is excluded from the signed message by design
+        // (mutable post-sign via with_commission_rate), so build the check
+        // registration WITHOUT applying the requested rate first.
+        {
+            let auth_check = ValidatorRegistration::new(
+                request.validator_id.clone(),
+                request.address.clone(),
+                request.port,
+                request.account_address.clone(),
+                request.public_key.clone(),
+                request.signature.clone(),
+                request.stake_amount,
+            );
+            if !auth_check.verify_signature() {
+                warn!(
+                    validator_id = %request.validator_id,
+                    "Rejecting validator registration: invalid ownership signature"
+                );
+                return RegisterValidatorResponse {
+                    success: false,
+                    message: "Invalid registration signature: must prove ownership of the claimed public key".to_string(),
+                };
+            }
+        }
 
         // Create registration event
         let vlc_time = self.service.get_vlc_time();

@@ -41,7 +41,15 @@ impl Anchor {
             .unwrap()
             .as_millis() as u64;
 
-        let id = Self::compute_id(&event_ids, &vlc_snapshot, &state_root, timestamp);
+        let id = Self::compute_id(
+            &event_ids,
+            &vlc_snapshot,
+            &state_root,
+            &None,
+            &previous_anchor,
+            depth,
+            timestamp,
+        );
 
         Self {
             id,
@@ -70,7 +78,15 @@ impl Anchor {
 
         // Use global_state_root as the legacy state_root
         let state_root = hex::encode(&merkle_roots.global_state_root);
-        let id = Self::compute_id(&event_ids, &vlc_snapshot, &state_root, timestamp);
+        let id = Self::compute_id(
+            &event_ids,
+            &vlc_snapshot,
+            &state_root,
+            &Some(&merkle_roots),
+            &previous_anchor,
+            depth,
+            timestamp,
+        );
 
         Self {
             id,
@@ -84,19 +100,47 @@ impl Anchor {
         }
     }
 
+    /// Anchor ID binds the full anchor content: ordered event IDs (commit
+    /// order is semantically meaningful, unlike DAG parent sets), full VLC
+    /// snapshot, state root + Merkle-roots digest, chain linkage
+    /// (`previous_anchor`, `depth`), and timestamp.
+    ///
+    /// Previously only (event IDs, VLC logical time, state root, timestamp)
+    /// were hashed: splicing `previous_anchor`/`depth` or swapping Merkle
+    /// roots went undetected by anyone comparing anchor IDs.
     fn compute_id(
         event_ids: &[EventId],
         vlc_snapshot: &VLCSnapshot,
         state_root: &str,
+        merkle_roots: &Option<&AnchorMerkleRoots>,
+        previous_anchor: &Option<AnchorId>,
+        depth: u64,
         timestamp: u64,
     ) -> AnchorId {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"SETU_ANCHOR_ID:");
+        hasher.update(b"SETU_ANCHOR_ID_V2:");
         for event_id in event_ids {
             hasher.update(event_id.as_bytes());
         }
         hasher.update(&vlc_snapshot.logical_time.to_le_bytes());
+        hasher.update(&vlc_snapshot.physical_time.to_le_bytes());
+        for (node_id, time) in vlc_snapshot.vector_clock.sorted_entries() {
+            hasher.update(node_id.as_bytes());
+            hasher.update(&time.to_le_bytes());
+        }
         hasher.update(state_root.as_bytes());
+        if let Some(roots) = merkle_roots {
+            // digest() already sorts subnet roots for determinism.
+            hasher.update(&roots.digest());
+        } else {
+            hasher.update(b"NO_MERKLE_ROOTS");
+        }
+        if let Some(prev) = previous_anchor {
+            hasher.update(prev.as_bytes());
+        } else {
+            hasher.update(b"NO_PREV_ANCHOR");
+        }
+        hasher.update(&depth.to_le_bytes());
         hasher.update(&timestamp.to_le_bytes());
         hex::encode(hasher.finalize().as_bytes())
     }

@@ -597,6 +597,7 @@ impl ConsensusEngine {
         let count = {
             let mut vs = self.validator_set.write().await;
             vs.add_validator(info.clone());
+            // add_validator may reject unauthenticated membership changes (#45)
             vs.count()
         };
         {
@@ -1064,6 +1065,10 @@ impl ConsensusEngine {
 
         self.ensure_cf_events_available(&cf).await?;
 
+        // Always-on eligibility filter (membership + CF binding) runs before
+        // the strict-mode signature filter below.
+        self.retain_eligible_embedded_votes(&mut cf).await;
+
         self.filter_embedded_votes_for_strict_mode(&mut cf).await;
 
         if self.require_vote_signatures() && self.private_key.read().await.is_none() {
@@ -1240,6 +1245,52 @@ impl ConsensusEngine {
         }
 
         Ok(())
+    }
+
+    /// Drop embedded votes that can never legitimately count toward quorum.
+    ///
+    /// This filter is UNCONDITIONAL (applies in both permissive and strict
+    /// modes): a vote for a different CF, or from a non-member, must never
+    /// inflate `approve_count`/`reject_count`. Previously only the strict-mode
+    /// filter ran, so in the default permissive mode a malicious proposer
+    /// could stuff a proposal with forged votes from fake validator IDs and
+    /// finalize a CF single-handedly (quorum forgery). Signature strength
+    /// remains governed by strict mode (`filter_embedded_votes_for_strict_mode`).
+    async fn retain_eligible_embedded_votes(&self, cf: &mut ConsensusFrame) {
+        if cf.votes.is_empty() {
+            return;
+        }
+
+        let member_ids: std::collections::HashSet<String> = {
+            let validator_set = self.validator_set.read().await;
+            validator_set
+                .all_validators()
+                .into_iter()
+                .map(|v| v.node.id.clone())
+                .collect()
+        };
+
+        let cf_id = cf.id.clone();
+        cf.votes.retain(|validator_id, vote| {
+            if vote.cf_id != cf_id {
+                warn!(
+                    cf_id = %cf_id,
+                    vote_cf_id = %vote.cf_id,
+                    voter = %vote.validator_id,
+                    "Dropping embedded vote for different CF"
+                );
+                return false;
+            }
+            if !member_ids.contains(validator_id.as_str()) {
+                warn!(
+                    cf_id = %cf_id,
+                    voter = %vote.validator_id,
+                    "Dropping embedded vote from non-member (quorum forgery attempt?)"
+                );
+                return false;
+            }
+            true
+        });
     }
 
     async fn filter_embedded_votes_for_strict_mode(&self, cf: &mut ConsensusFrame) {
@@ -1917,6 +1968,8 @@ pub struct DagStats {
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand_core::OsRng;
     use super::*;
     use crate::broadcaster::MockBroadcaster;
     use setu_types::{Anchor, AnchorMerkleRoots, EventType, NodeInfo, ValidatorInfo};
@@ -1931,7 +1984,11 @@ mod tests {
                 "127.0.0.1".to_string(),
                 8000 + i as u16,
             );
-            set.add_validator(ValidatorInfo::new(node, false));
+            let mut node_info = node.clone();
+            let signing_key = SigningKey::generate(&mut OsRng);
+            node_info.public_key = signing_key.verifying_key().to_bytes().to_vec();
+            let signature = signing_key.sign(node.id.as_bytes()).to_bytes().to_vec();
+            set.add_validator(ValidatorInfo::new(node_info, false).with_signature(signature));
         }
         set
     }
@@ -2406,6 +2463,82 @@ mod tests {
         assert!(
             anchor.is_some(),
             "finalized CF should return anchor for persistence"
+        );
+    }
+
+    /// Quorum-forgery regression: a malicious proposer must not be able to
+    /// finalize a CF single-handedly by embedding votes from fake validator
+    /// IDs in the proposal. `retain_eligible_embedded_votes` strips
+    /// non-member (and cross-CF) votes in ALL modes, not just strict mode.
+    #[tokio::test]
+    async fn test_receive_cf_drops_forged_non_member_votes() {
+        let config = ConsensusConfig {
+            vlc_delta_threshold: 1,
+            min_events_per_cf: 1,
+            max_events_per_cf: 1000,
+            cf_timeout_ms: 5000,
+            validator_count: 3,
+        };
+
+        let leader = ConsensusEngine::new(config.clone(), "v1".to_string(), create_validator_set());
+        let follower = ConsensusEngine::new(config, "v2".to_string(), create_validator_set());
+
+        let event = Event::new(
+            EventType::System,
+            vec![],
+            VLCSnapshot {
+                vector_clock: VectorClock::new(),
+                logical_time: 1,
+                physical_time: 0,
+            },
+            "v1".to_string(),
+        );
+
+        {
+            let mut vlc = leader.vlc.write().await;
+            vlc.merge(&event.vlc_snapshot);
+            vlc.tick();
+        }
+        leader
+            .dag_manager
+            .add_event_with_retry(event.clone())
+            .await
+            .unwrap();
+        follower.receive_event_from_network(event).await.unwrap();
+
+        let mut cf = leader
+            .try_create_cf()
+            .await
+            .unwrap()
+            .expect("leader should have created a pending CF");
+
+        // Attacker stuffs the proposal with forged approvals from fake IDs.
+        // With 3 validators quorum is 3: 2 forged + follower's own honest
+        // vote would finalize if the forgeries counted.
+        let cf_id = cf.id.clone();
+        cf.add_vote(Vote::new("evil-1".to_string(), cf_id.clone(), true));
+        cf.add_vote(Vote::new("evil-2".to_string(), cf_id.clone(), true));
+        // A vote for a DIFFERENT CF must never count either.
+        cf.add_vote(Vote::new("v1".to_string(), "other-cf-id".to_string(), true));
+
+        let (finalized, _) = match follower.receive_cf(cf).await.unwrap() {
+            CfReceiveOutcome::Accepted { finalized, anchor } => (finalized, anchor),
+            other => panic!("expected Accepted outcome, got {:?}", other),
+        };
+        assert!(
+            !finalized,
+            "forged non-member votes must be stripped: only the follower's \
+             honest vote may count, which is below quorum (1 < 3)"
+        );
+
+        // The pending CF must contain no trace of the forgeries.
+        let manager = follower.consensus_manager.read().await;
+        let pending = manager
+            .get_pending_cf(&cf_id)
+            .expect("CF must be pending");
+        assert!(
+            !pending.votes.contains_key("evil-1") && !pending.votes.contains_key("evil-2"),
+            "forged votes must not be stored in pending state"
         );
     }
 

@@ -18,3 +18,4 @@ bincode = "2.0"
 bcs.workspace = true
 setu-vlc = { path = "../crates/setu-vlc" }
 ed25519-dalek = { version = "2.1", features = ["serde"] }
+k256 = { version = "0.13", features = ["ecdsa"] }

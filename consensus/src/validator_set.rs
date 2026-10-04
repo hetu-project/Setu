@@ -7,6 +7,7 @@
 //! It integrates with the liveness module for leader election.
 
 use setu_types::ValidatorInfo;
+use tracing::warn;
 #[cfg(test)]
 use setu_types::NodeInfo;
 use std::collections::HashMap;
@@ -81,7 +82,21 @@ impl ValidatorSet {
     }
 
     /// Add a validator to the set.
+    ///
+    /// Rejects unauthenticated validator membership changes (#45).
+    /// The validator's signature over its node ID must be verified
+    /// before adding to prevent unauthorized membership changes.
+    /// If verification fails, the validator is NOT added and a warning is logged.
     pub fn add_validator(&mut self, mut info: ValidatorInfo) {
+        // Verify the validator's signature (audit #45 / unauthenticated membership)
+        if let Err(e) = info.verify() {
+            warn!(
+                validator_id = %info.node.id,
+                "Rejecting unauthenticated validator membership change: {}", e
+            );
+            return;
+        }
+        
         let is_first = self.validators.is_empty();
         
         // First validator becomes the initial leader
@@ -324,16 +339,28 @@ impl Default for ValidatorSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand_core::OsRng;
 
     fn create_validator(id: &str) -> ValidatorInfo {
-        let node = NodeInfo::new_validator(id.to_string(), "127.0.0.1".to_string(), 8000);
-        ValidatorInfo::new(node, false)
+        let mut node = NodeInfo::new_validator(id.to_string(), "127.0.0.1".to_string(), 8000);
+        node.public_key = Vec::new(); // will be set below
+        // Generate a signing key and derive the public key
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
+        node.public_key = public_key_bytes.clone();
+        let signature = signing_key.sign(id.as_bytes()).to_bytes().to_vec();
+        ValidatorInfo::new(node, false).with_signature(signature)
     }
 
     fn create_validator_with_stake(id: &str, stake: u64) -> ValidatorInfo {
         let mut node = NodeInfo::new_validator(id.to_string(), "127.0.0.1".to_string(), 8000);
         node.stake = stake;
-        ValidatorInfo::new(node, false)
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
+        node.public_key = public_key_bytes.clone();
+        let signature = signing_key.sign(id.as_bytes()).to_bytes().to_vec();
+        ValidatorInfo::new(node, false).with_signature(signature)
     }
 
     #[test]

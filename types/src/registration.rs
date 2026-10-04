@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 // Re-use SubnetType from subnet module (single source of truth)
 pub use crate::subnet::SubnetType;
 
+/// Length-prefix helper for domain-separated signing messages.
+fn extend_len_prefixed(msg: &mut Vec<u8>, bytes: &[u8]) {
+    msg.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    msg.extend_from_slice(bytes);
+}
+
 // ========== Validator Registration ==========
 
 /// Validator registration data
@@ -66,11 +72,73 @@ impl ValidatorRegistration {
         self
     }
     
-    /// Verify the registration signature
+    /// Verify the registration signature (real secp256k1 verification).
+    ///
+    /// Proves ownership of the claimed `public_key`: the signature must be
+    /// a 64-byte compact ECDSA/secp256k1 signature over
+    /// `BLAKE3(signing_message())`, verifiable by the 65-byte uncompressed
+    /// SEC1 `public_key` (0x04 || x || y). Empty/malformed inputs fail.
+    ///
+    /// Previously this was a non-empty stub (`!signature.is_empty() &&
+    /// !public_key.is_empty()`), and — worse — the validator-registration
+    /// handler never called it at all, so anyone could register an arbitrary
+    /// validator identity straight into the consensus set.
     pub fn verify_signature(&self) -> bool {
-        // TODO: Implement actual ECDSA signature verification
-        // Message format: "Register Validator: {validator_id}:{account_address}:{timestamp}"
-        !self.signature.is_empty() && !self.public_key.is_empty()
+        use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+        if self.signature.len() != 64 || self.public_key.len() != 65 {
+            return false;
+        }
+        let verifying_key = match VerifyingKey::from_sec1_bytes(&self.public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        let signature = match Signature::from_slice(&self.signature) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        let digest = crate::hash_utils::setu_hash(&self.signing_message());
+        verifying_key.verify(&digest, &signature).is_ok()
+    }
+
+    /// Deterministic signing message binding the whole claimed identity.
+    ///
+    /// Domain-separated and length-prefixed (same pattern as
+    /// `SystemSubnetRegistration::signing_message`): every field an
+    /// attacker could swap (id, address, port, account, stake) is committed.
+    /// `commission_rate` is intentionally EXCLUDED — it is mutable post-sign
+    /// via `with_commission_rate` (capped 0-100 separately).
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"SETU_REGISTER_VALIDATOR_V1");
+        extend_len_prefixed(&mut msg, self.validator_id.as_bytes());
+        extend_len_prefixed(&mut msg, self.address.as_bytes());
+        msg.extend_from_slice(&self.port.to_le_bytes());
+        extend_len_prefixed(&mut msg, self.account_address.as_bytes());
+        msg.extend_from_slice(&self.stake_amount.to_le_bytes());
+        extend_len_prefixed(&mut msg, self.public_key.as_slice());
+        msg
+    }
+
+    /// Sign the registration with a 32-byte secp256k1 private key.
+    ///
+    /// Signs `BLAKE3(signing_message())` deterministically (RFC 6979).
+    /// Mirrors `verify_signature` below: same digest, same scheme.
+    pub fn sign(&mut self, private_key: &[u8]) -> Result<(), String> {
+        use k256::ecdsa::{signature::Signer, SigningKey};
+
+        if private_key.len() != 32 {
+            return Err(format!(
+                "Invalid private key length: expected 32, got {}",
+                private_key.len()
+            ));
+        }
+        let signing_key = SigningKey::from_slice(private_key)
+            .map_err(|e| format!("Invalid signing key: {e}"))?;
+        let digest = crate::hash_utils::setu_hash(&self.signing_message());
+        let sig: k256::ecdsa::Signature = signing_key.sign(&digest);
+        self.signature = sig.to_bytes().to_vec();
+        Ok(())
     }
 }
 
@@ -162,11 +230,68 @@ impl SolverRegistration {
         self
     }
     
-    /// Verify the registration signature
+    /// Verify the registration signature (real secp256k1 verification).
+    ///
+    /// Same scheme as `ValidatorRegistration`: 64-byte compact ECDSA over
+    /// `BLAKE3(signing_message())`, verifiable by the 65-byte uncompressed
+    /// SEC1 `public_key`. Fail-closed on empty/malformed inputs.
+    ///
+    /// Previously a non-empty stub — and the solver-registration handler
+    /// never called it, so anyone could register phantom solvers whose
+    /// addresses route tasks into the void (no staleness eviction exists;
+    /// fake entries persist and degrade task routing indefinitely).
     pub fn verify_signature(&self) -> bool {
-        // TODO: Implement actual ECDSA signature verification
-        // Message format: "Register Solver: {solver_id}:{account_address}:{timestamp}"
-        !self.signature.is_empty() && !self.public_key.is_empty()
+        use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+        if self.signature.len() != 64 || self.public_key.len() != 65 {
+            return false;
+        }
+        let verifying_key = match VerifyingKey::from_sec1_bytes(&self.public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        let signature = match Signature::from_slice(&self.signature) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        let digest = crate::hash_utils::setu_hash(&self.signing_message());
+        verifying_key.verify(&digest, &signature).is_ok()
+    }
+
+    /// Deterministic signing message binding the claimed solver identity.
+    ///
+    /// Binds solver_id, address, port, account_address, public_key.
+    /// Capability fields (capacity, shard, resources, permitted_subnets)
+    /// are routing hints, mutable post-sign via `with_*` builders, and are
+    /// intentionally EXCLUDED (same rationale as commission_rate on the
+    /// validator side).
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"SETU_REGISTER_SOLVER_V1");
+        extend_len_prefixed(&mut msg, self.solver_id.as_bytes());
+        extend_len_prefixed(&mut msg, self.address.as_bytes());
+        msg.extend_from_slice(&self.port.to_le_bytes());
+        extend_len_prefixed(&mut msg, self.account_address.as_bytes());
+        extend_len_prefixed(&mut msg, self.public_key.as_slice());
+        msg
+    }
+
+    /// Sign the registration with a 32-byte secp256k1 private key.
+    pub fn sign(&mut self, private_key: &[u8]) -> Result<(), String> {
+        use k256::ecdsa::{signature::Signer, SigningKey};
+
+        if private_key.len() != 32 {
+            return Err(format!(
+                "Invalid private key length: expected 32, got {}",
+                private_key.len()
+            ));
+        }
+        let signing_key = SigningKey::from_slice(private_key)
+            .map_err(|e| format!("Invalid signing key: {e}"))?;
+        let digest = crate::hash_utils::setu_hash(&self.signing_message());
+        let sig: k256::ecdsa::Signature = signing_key.sign(&digest);
+        self.signature = sig.to_bytes().to_vec();
+        Ok(())
     }
 }
 
@@ -683,6 +808,89 @@ mod tests {
         assert_eq!(reg.commission_rate, 15);
     }
     
+    /// Deterministic test keypair (fixed private key; pubkey derived via k256).
+    fn test_keypair() -> ([u8; 32], Vec<u8>) {
+        use k256::ecdsa::SigningKey;
+        let sk_bytes = [42u8; 32];
+        let sk = SigningKey::from_slice(&sk_bytes).expect("fixed test key");
+        let pk = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        assert_eq!(pk.len(), 65);
+        (sk_bytes, pk)
+    }
+
+    fn signed_validator_registration() -> ValidatorRegistration {
+        let (sk, pk) = test_keypair();
+        let mut reg = ValidatorRegistration::new(
+            "v1",
+            "127.0.0.1",
+            8080,
+            "0xabcd1234",
+            pk,
+            vec![],
+            10000,
+        );
+        reg.sign(&sk).expect("sign test registration");
+        reg
+    }
+
+    #[test]
+    fn test_validator_registration_signature_roundtrip() {
+        let reg = signed_validator_registration();
+        assert_eq!(reg.signature.len(), 64);
+        assert!(reg.verify_signature(), "valid signature must verify");
+    }
+
+    #[test]
+    fn test_validator_registration_rejects_tampered_fields() {
+        // Swapping any bound field must invalidate the signature.
+        let mut reg = signed_validator_registration();
+        reg.stake_amount = 99999;
+        assert!(!reg.verify_signature(), "tampered stake must fail");
+
+        let mut reg = signed_validator_registration();
+        reg.validator_id = "attacker".to_string();
+        assert!(!reg.verify_signature(), "tampered id must fail");
+
+        let mut reg = signed_validator_registration();
+        reg.port = 9999;
+        assert!(!reg.verify_signature(), "tampered port must fail");
+    }
+
+    #[test]
+    fn test_validator_registration_rejects_wrong_key_and_garbage() {
+        // Signature from a different key must not verify.
+        let (_, pk) = test_keypair();
+        let mut reg = signed_validator_registration();
+        reg.public_key = {
+            use k256::ecdsa::SigningKey;
+            let other = SigningKey::from_slice(&[7u8; 32]).unwrap();
+            other
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec()
+        };
+        assert!(!reg.verify_signature(), "wrong key must fail");
+        let _ = pk;
+
+        // Empty / malformed inputs fail closed.
+        let mut reg = signed_validator_registration();
+        reg.signature.clear();
+        assert!(!reg.verify_signature(), "empty signature must fail");
+
+        let mut reg = signed_validator_registration();
+        reg.signature = vec![0u8; 10];
+        assert!(!reg.verify_signature(), "short signature must fail");
+
+        let mut reg = signed_validator_registration();
+        reg.public_key = vec![1, 2, 3];
+        assert!(!reg.verify_signature(), "malformed pubkey must fail");
+    }
+
     #[test]
     fn test_solver_registration() {
         let reg = SolverRegistration::new(
@@ -699,6 +907,56 @@ mod tests {
         assert_eq!(reg.account_address, "0xef123456");
         assert_eq!(reg.capacity, 50);
         assert_eq!(reg.shard_id, Some("shard-0".to_string()));
+    }
+
+    fn signed_solver_registration() -> SolverRegistration {
+        let (sk, pk) = validator_test_keypair();
+        let mut reg = SolverRegistration::new(
+            "s1",
+            "127.0.0.1",
+            9000,
+            "0xef123456",
+            pk,
+            vec![],
+        );
+        reg.sign(&sk).expect("sign test solver registration");
+        reg
+    }
+
+    /// Shared deterministic test keypair (fixed private key).
+    fn validator_test_keypair() -> ([u8; 32], Vec<u8>) {
+        use k256::ecdsa::SigningKey;
+        let sk_bytes = [43u8; 32];
+        let sk = SigningKey::from_slice(&sk_bytes).expect("fixed test key");
+        let pk = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        assert_eq!(pk.len(), 65);
+        (sk_bytes, pk)
+    }
+
+    #[test]
+    fn test_solver_registration_signature_roundtrip() {
+        let reg = signed_solver_registration();
+        assert_eq!(reg.signature.len(), 64);
+        assert!(reg.verify_signature(), "valid solver signature must verify");
+    }
+
+    #[test]
+    fn test_solver_registration_rejects_tampering_and_garbage() {
+        let mut reg = signed_solver_registration();
+        reg.address = "9.9.9.9".to_string();
+        assert!(!reg.verify_signature(), "tampered address must fail");
+
+        let mut reg = signed_solver_registration();
+        reg.signature.clear();
+        assert!(!reg.verify_signature(), "empty signature must fail");
+
+        let mut reg = signed_solver_registration();
+        reg.public_key = vec![0u8; 10];
+        assert!(!reg.verify_signature(), "malformed pubkey must fail");
     }
     
     #[test]

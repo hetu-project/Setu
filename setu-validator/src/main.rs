@@ -523,8 +523,14 @@ async fn main() -> anyhow::Result<()> {
                     vlc_snapshot,
                 );
                 genesis_event.timestamp = 0; // Fixed timestamp
-                genesis_event.recompute_id(); // Recompute ID with deterministic fields
-                genesis_event.payload = EventPayload::Genesis(genesis_config.clone());
+                // NOTE: genesis is submitted WITHOUT `EventPayload::Genesis`.
+                // The event ID commits to the full content, so any payload
+                // would make the ID chain-dependent (genesis accounts differ
+                // per chain) and break `Event::genesis_event_id()`, which the
+                // task-preparer parent filter relies on as a constant.
+                // Execution state rides in `execution_result` (NOT ID-bound
+                // by design) and is applied idempotently; consumers key on
+                // `is_genesis()`, never on the payload.
                 genesis_event.set_execution_result(ExecutionResult {
                     success: true,
                     message: Some(format!(
@@ -534,10 +540,9 @@ async fn main() -> anyhow::Result<()> {
                     )),
                     state_changes: state_changes.clone(),
                 });
-                // Recompute ID after setting payload and execution_result
-                // (verify_id checks against parent_ids, vlc, creator, timestamp)
-                // The ID is computed from (parent_ids, vlc, creator, timestamp) so
-                // payload/execution_result changes don't invalidate it.
+                // Recompute ID AFTER fixing timestamp so the sealed ID matches
+                // the submitted shell content.
+                genesis_event.recompute_id();
 
                 // Submit genesis event to the DAG
                 match consensus_validator.submit_event(genesis_event.clone()).await {

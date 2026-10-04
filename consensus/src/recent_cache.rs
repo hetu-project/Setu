@@ -150,10 +150,13 @@ impl RecentEventCache {
     /// # Arguments
     /// * `capacity` - Maximum number of entries (recommended: 10,000 - 20,000)
     pub fn new(capacity: usize) -> Self {
-        let cap = NonZeroUsize::new(capacity).expect("capacity must be non-zero");
+        // Guard against capacity 0 — an empty LRU cache is never useful
+        // and would cause a panic in NonZeroUsize::new().
+        let effective_capacity = std::cmp::max(capacity, 1);
+        let cap = NonZeroUsize::new(effective_capacity).expect("capacity must be non-zero");
         Self {
             cache: LruCache::new(cap),
-            capacity,
+            capacity: effective_capacity,
             stats: CacheStats::new(),
         }
     }

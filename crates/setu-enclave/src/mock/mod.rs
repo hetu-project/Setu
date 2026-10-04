@@ -689,7 +689,7 @@ impl MockEnclave {
         &self,
         input: &StfInput,
         mut local_runtime: RuntimeExecutor<InMemoryObjectStore>,
-    ) -> StfResult<(StateDiff, Vec<EventId>, Vec<FailedEvent>)> {
+    ) -> StfResult<(StateDiff, Vec<EventId>, Vec<FailedEvent>, RuntimeExecutor<InMemoryObjectStore>)> {
         let start = std::time::Instant::now();
         let mut diff = StateDiff::new();
         let mut processed = Vec::new();
@@ -796,7 +796,7 @@ impl MockEnclave {
         // Increment execution counter
         *self.execution_count.write().await += 1;
 
-        Ok((diff, processed, failed))
+        Ok((diff, processed, failed, local_runtime))
     }
 
     /// Execute a single event using the provided runtime
@@ -1765,7 +1765,7 @@ impl EnclaveRuntime for MockEnclave {
             .any(|e| matches!(e.payload, setu_types::event::EventPayload::MovePtb(_)));
         let use_read_set_state = use_read_set_state || has_move_ptb;
 
-        let (diff, events_processed, events_failed) = if use_read_set_state {
+        let (diff, events_processed, events_failed, post_state_root) = if use_read_set_state {
             // Build temporary state from read_set into a LOCAL ObjectStore
             let local_store =
                 self.build_object_store_from_read_set(&input.read_set, &input.module_read_set)?;
@@ -1778,19 +1778,29 @@ impl EnclaveRuntime for MockEnclave {
             );
 
             // Execute using the ISOLATED local runtime (not self.runtime!)
-            self.simulate_execution_isolated(&input, local_runtime)
-                .await?
+            let (diff, events_processed, events_failed, runtime) =
+                self.simulate_execution_isolated(&input, local_runtime)
+                    .await?;
+            let raw_data: std::collections::HashMap<String, Vec<u8>> =
+                runtime.state().raw().clone();
+            let post_state_root = Self::compute_state_root(&raw_data);
+            (diff, events_processed, events_failed, post_state_root)
         } else {
             // Legacy mode: use shared self.runtime (only for backward compatibility)
-            self.simulate_execution(&input, None).await?
-        };
-
-        // Compute post-state root from legacy state
-        // Note: For full object model, should compute from RuntimeExecutor state
-        #[allow(deprecated)]
-        let post_state_root = {
-            let state = self.legacy_state.read().await;
-            Self::compute_state_root(&state)
+            self.simulate_execution(&input, None).await?;
+            // self.runtime contains the post-execution state
+            let guard = self.runtime.read().await;
+            let state = guard.state().clone();
+            drop(guard);
+            let runtime = RuntimeExecutor::new(state);
+            let raw_data: std::collections::HashMap<String, Vec<u8>> = runtime
+                .state()
+                .raw_objects()
+                .iter()
+                .map(|(id, bytes)| (format!("{:?}", id), bytes.clone()))
+                .collect();
+            let post_state_root = Self::compute_state_root(&raw_data);
+            (StateDiff::new(), Vec::new(), Vec::new(), post_state_root)
         };
 
         // Compute input hash for attestation binding

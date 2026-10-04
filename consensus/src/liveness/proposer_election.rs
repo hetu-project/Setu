@@ -94,10 +94,11 @@ pub fn choose_index(weights: Vec<VotingPower>, seed: Vec<u8>) -> usize {
     let mut total_weight: VotingPower = 0;
 
     // Convert to cumulative weights
+    // Uses saturating_add to prevent panics on overflow —
+    // an attacker could otherwise trigger a DoS by providing
+    // weights that overflow u128.
     for w in &mut cumulative_weights {
-        total_weight = total_weight
-            .checked_add(*w)
-            .expect("Total weight overflow");
+        total_weight = total_weight.saturating_add(*w);
         *w = total_weight;
     }
 
