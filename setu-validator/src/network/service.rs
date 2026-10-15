@@ -2294,13 +2294,29 @@ mod tests {
     }
 
     fn sample_solver_request(solver_id: &str) -> setu_rpc::RegisterSolverRequest {
+        use k256::ecdsa::SigningKey;
+        let sk = SigningKey::from_slice(&[43u8; 32]).expect("fixed test key");
+        let pk = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let mut reg = setu_types::SolverRegistration::new(
+            solver_id.to_string(),
+            "127.0.0.1".to_string(),
+            9001,
+            "0xtest".to_string(),
+            pk,
+            vec![],
+        );
+        reg.sign(&[43u8; 32]).expect("sign test request");
         setu_rpc::RegisterSolverRequest {
             solver_id: solver_id.to_string(),
             address: "127.0.0.1".to_string(),
             port: 9001,
             account_address: "0xtest".to_string(),
-            public_key: vec![],
-            signature: vec![],
+            public_key: reg.public_key,
+            signature: reg.signature,
             capacity: 100,
             shard_id: Some("shard-0".to_string()),
             assigned_shard: None,
@@ -2309,14 +2325,34 @@ mod tests {
         }
     }
 
+    /// Build a validator registration request with a VALID ownership
+    /// signature (deterministic test key). Unsigned/forged requests must
+    /// be rejected by the handler (see invalid-signature tests below).
     fn sample_validator_request(validator_id: &str) -> setu_rpc::RegisterValidatorRequest {
+        use k256::ecdsa::SigningKey;
+        let sk = SigningKey::from_slice(&[42u8; 32]).expect("fixed test key");
+        let pk = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let mut reg = setu_types::ValidatorRegistration::new(
+            validator_id.to_string(),
+            "127.0.0.1".to_string(),
+            9002,
+            "0xtest".to_string(),
+            pk,
+            vec![],
+            1000,
+        );
+        reg.sign(&[42u8; 32]).expect("sign test request");
         setu_rpc::RegisterValidatorRequest {
             validator_id: validator_id.to_string(),
             address: "127.0.0.1".to_string(),
             port: 9002,
             account_address: "0xtest".to_string(),
-            public_key: vec![],
-            signature: vec![],
+            public_key: reg.public_key,
+            signature: reg.signature,
             stake_amount: 1000,
             commission_rate: 10,
         }
@@ -2467,6 +2503,7 @@ mod tests {
             proposal_id,
             action: setu_types::governance::GovernanceAction::RegisterSystemSubnet(registration),
         });
+        event.recompute_id(); // Seal content-bound ID (verify_id gate)
         event.set_execution_result(setu_types::ExecutionResult::success());
         event
     }
@@ -2511,6 +2548,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_solver_rejects_missing_signature() {
+        // Phantom-solver admission: no ownership proof at all.
+        let service = create_test_service();
+        let handler = service.registration_handler();
+        let mut request = sample_solver_request("solver-evil");
+        request.signature.clear();
+
+        let response = handler.register_solver(request).await;
+
+        assert!(!response.success);
+        assert!(response.message.contains("signature"));
+        assert_eq!(service.router_manager().solver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn register_solver_rejects_tampered_address() {
+        // Valid signature, then swap a bound field: must invalidate.
+        let service = create_test_service();
+        let handler = service.registration_handler();
+        let mut request = sample_solver_request("solver-evil");
+        request.address = "9.9.9.9".to_string();
+
+        let response = handler.register_solver(request).await;
+
+        assert!(!response.success);
+        assert!(response.message.contains("signature"));
+        assert_eq!(service.router_manager().solver_count(), 0);
+    }
+
+    #[tokio::test]
     async fn register_solver_submit_failure_does_not_activate_solver() {
         let service = create_test_service();
         let handler = service.registration_handler();
@@ -2537,6 +2604,58 @@ mod tests {
 
         assert!(!response.success);
         assert!(response.message.contains("forced submit failure"));
+        assert_eq!(service.validator_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn register_validator_rejects_missing_signature() {
+        // Open-registration exploit (#45 class): no ownership proof at all.
+        let service = create_test_service();
+        let handler = service.registration_handler();
+        let mut request = sample_validator_request("validator-evil");
+        request.signature.clear();
+
+        let response = handler.register_validator(request).await;
+
+        assert!(!response.success);
+        assert!(response.message.contains("signature"));
+        assert_eq!(service.validator_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn register_validator_rejects_tampered_fields() {
+        // Valid signature, then swap a bound field (address): the signature
+        // no longer matches the claimed identity.
+        let service = create_test_service();
+        let handler = service.registration_handler();
+        let mut request = sample_validator_request("validator-evil");
+        request.address = "9.9.9.9".to_string();
+
+        let response = handler.register_validator(request).await;
+
+        assert!(!response.success);
+        assert!(response.message.contains("signature"));
+        assert_eq!(service.validator_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn register_validator_rejects_wrong_key() {
+        // Signature made by a different key than the claimed public_key.
+        use k256::ecdsa::SigningKey;
+        let service = create_test_service();
+        let handler = service.registration_handler();
+        let mut request = sample_validator_request("validator-evil");
+        let other = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        request.public_key = other
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+
+        let response = handler.register_validator(request).await;
+
+        assert!(!response.success);
+        assert!(response.message.contains("signature"));
         assert_eq!(service.validator_count(), 0);
     }
 

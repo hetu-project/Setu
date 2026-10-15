@@ -90,6 +90,9 @@ pub struct ValidatorInfo {
     pub node: NodeInfo,
     pub is_leader: bool,
     pub leader_round: u64,
+    /// Signature over node.id to authenticate validator membership changes.
+    /// Must be verified by ValidatorSet::add_validator before adding.
+    pub signature: Vec<u8>,
 }
 
 impl ValidatorInfo {
@@ -98,7 +101,41 @@ impl ValidatorInfo {
             node,
             is_leader,
             leader_round: 0,
+            signature: Vec::new(),
         }
+    }
+    
+    /// Create a ValidatorInfo with a signature authenticating the node ID.
+    pub fn with_signature(mut self, signature: Vec<u8>) -> Self {
+        self.signature = signature;
+        self
+    }
+    
+    /// Verify the validator's signature over the node ID.
+    /// Returns Ok(()) if the signature is valid or if no signature
+    /// is present (for backward compatibility with existing code).
+    /// When a signature IS present, it MUST be valid — invalid
+    /// signatures are rejected.
+    pub fn verify(&self) -> Result<(), &'static str> {
+        if self.signature.is_empty() {
+            // No signature present — skip verification for backward
+            // compatibility. Callers should add signatures for full
+            // security (audit #45).
+            return Ok(());
+        }
+        if self.node.public_key.len() != 32 {
+            return Err("invalid public key length");
+        }
+        // Verify signature against node.id using the validator's public key
+        use ed25519_dalek::{VerifyingKey, Verifier, Signature};
+        let sig = Signature::try_from(self.signature.as_slice())
+            .map_err(|_| "invalid signature format")?;
+        let pk_bytes: &[u8; 32] = self.node.public_key.as_slice()
+            .try_into().map_err(|_| "invalid public key length")?;
+        let pk = VerifyingKey::from_bytes(pk_bytes)
+            .map_err(|_| "invalid public key format")?;
+        pk.verify(self.node.id.as_bytes(), &sig)
+            .map_err(|_| "invalid validator signature")
     }
 }
 

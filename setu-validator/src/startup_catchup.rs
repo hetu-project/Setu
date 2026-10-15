@@ -187,14 +187,46 @@ impl CatchUpApplier for EngineCatchUpApplier {
     async fn apply_cf(&self, cf: ConsensusFrame) -> Result<(), CatchUpError> {
         let cf_id = cf.id.clone();
         let depth = cf.anchor.depth;
-        match self.engine.receive_finalized_cf(cf).await {
+        let round = cf.round;
+        match self.engine.receive_finalized_cf(cf.clone()).await {
             Ok((applied, _anchor)) => {
                 if applied {
                     info!(cf_id = %cf_id, depth, "startup catch-up applied CF");
                 } else {
-                    // Already finalized — treat as progress regardless because
-                    // the local store now reflects this depth.
+                    // Already finalized in-memory — treat as progress
+                    // regardless because the local store now reflects this
+                    // depth.
                     warn!(cf_id = %cf_id, depth, "CF already finalized locally during catch-up");
+                }
+                // Durably persist the CF so `highest_finalized_depth`
+                // advances. WITHOUT this, the depth source never moves and
+                // the loop re-pulls the same CFs until the wall-clock budget
+                // kills catch-up (HTTP never starts) — every lagging node
+                // would be stuck after any restart. `store` is idempotent
+                // (keyed by cf_id), so re-persisting an already-finalized CF
+                // is harmless.
+                self.cf_store
+                    .store(cf)
+                    .await
+                    .map_err(|e| CatchUpError::Store(format!("{:?}", e)))?;
+                self.cf_store
+                    .mark_finalized(&cf_id)
+                    .await
+                    .map_err(|e| CatchUpError::Store(format!("{:?}", e)))?;
+                // Advance the local round to the chain tip. Otherwise the
+                // node finishes catch-up at round 0 while the chain is at
+                // round N, and every live proposal looks "ahead"
+                // (NeedsCatchUp) forever. Monotonic: never move backwards.
+                {
+                    let vs = self.engine.validator_set_ref().read().await;
+                    if round > vs.current_round() {
+                        drop(vs);
+                        self.engine
+                            .validator_set_ref()
+                            .write()
+                            .await
+                            .set_round(round);
+                    }
                 }
                 Ok(())
             }

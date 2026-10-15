@@ -90,18 +90,56 @@ pub trait ProposerElection: Send + Sync {
 /// # Returns
 /// The index of the selected candidate
 pub fn choose_index(weights: Vec<VotingPower>, seed: Vec<u8>) -> usize {
-    let mut cumulative_weights = weights;
-    let mut total_weight: VotingPower = 0;
+    assert!(
+        !weights.is_empty(),
+        "choose_index requires at least one candidate"
+    );
 
-    // Convert to cumulative weights
-    for w in &mut cumulative_weights {
-        total_weight = total_weight
-            .checked_add(*w)
-            .expect("Total weight overflow");
-        *w = total_weight;
-    }
+    // Overflow policy: plain saturating accumulation would pin EVERY
+    // candidate at u128::MAX once the total overflows, so the very first
+    // candidate would always win regardless of weights. Instead, halve all
+    // weights (keeping relative proportions, deterministic) and retry; the
+    // loop terminates because halving strictly reduces any nonzero total.
+    let mut scaled = weights;
+    let cumulative_weights = loop {
+        let mut total_weight: VotingPower = 0;
+        let mut overflowed = false;
+        for w in &scaled {
+            match total_weight.checked_add(*w) {
+                Some(t) => total_weight = t,
+                None => {
+                    overflowed = true;
+                    break;
+                }
+            }
+        }
+        if !overflowed {
+            if total_weight == 0 {
+                // All-zero weights carry no information; fall back to uniform
+                // choice rather than dividing by zero in next_in_range.
+                for w in &mut scaled {
+                    *w = 1;
+                }
+            }
+            let mut cumulative = scaled;
+            let mut running: VotingPower = 0;
+            for w in &mut cumulative {
+                running += *w;
+                *w = running;
+            }
+            break cumulative;
+        }
+        // Halve every weight (min 1 for previously-nonzero entries so no
+        // candidate is silently dropped to zero weight).
+        for w in &mut scaled {
+            if *w > 0 {
+                *w = (*w >> 1).max(1);
+            }
+        }
+    };
 
     // Generate a pseudo-random value from seed
+    let total_weight = *cumulative_weights.last().expect("non-empty weights");
     let chosen_weight = next_in_range(seed, total_weight);
 
     // Binary search to find the selected index
@@ -172,6 +210,40 @@ mod tests {
             let seed = i.to_le_bytes().to_vec();
             let value = next_in_range(seed, 1000);
             assert!(value < 1000, "Value out of bounds: {}", value);
+        }
+    }
+
+    #[test]
+    fn test_choose_index_overflow_keeps_proportionality() {
+        // Saturating accumulation would pin every candidate at u128::MAX and
+        // always pick index 0. Halving rescale must preserve order instead.
+        let weights = vec![u128::MAX, u128::MAX];
+        for i in 0u64..200 {
+            let seed = i.to_le_bytes().to_vec();
+            let idx = choose_index(weights.clone(), seed);
+            assert!(idx < 2, "index out of bounds: {}", idx);
+        }
+        // Unequal overflowing weights must still favor the heavier side.
+        let mut first_wins = 0u32;
+        for i in 0u64..200 {
+            let seed = i.to_le_bytes().to_vec();
+            if choose_index(vec![u128::MAX, u128::MAX / 2], seed) == 0 {
+                first_wins += 1;
+            }
+        }
+        assert!(
+            first_wins > 100,
+            "heavier candidate should win majority, got {first_wins}/200"
+        );
+    }
+
+    #[test]
+    fn test_choose_index_all_zero_falls_back_to_uniform() {
+        // Zero total must not divide by zero; uniform fallback picks valid indices.
+        for i in 0u64..50 {
+            let seed = i.to_le_bytes().to_vec();
+            let idx = choose_index(vec![0, 0, 0], seed);
+            assert!(idx < 3, "index out of bounds: {}", idx);
         }
     }
 }

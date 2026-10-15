@@ -74,4 +74,5 @@ setu-solver = { path = "../setu-solver" }
 setu-storage = { path = "../storage", features = ["test-utils"] }
 setu-types = { path = "../types", features = ["test-utils"] }
 ed25519-dalek = "2.1"
+k256 = { version = "0.13", features = ["ecdsa"] }
 tempfile = "3.10"

@@ -520,9 +520,8 @@ impl Event {
             .unwrap()
             .as_millis() as u64;
         
-        let id = Self::compute_id(&parent_ids, &vlc_snapshot, &creator, timestamp);
-        
-        // Infer subnet_id from event_type
+        // Infer subnet_id from event_type BEFORE sealing the ID:
+        // the ID commits to the subnet, so inference must precede hashing.
         let subnet_id = if event_type.is_root_event() {
             Some(crate::subnet::SubnetId::ROOT)
         } else if matches!(event_type, EventType::Governance) {
@@ -530,7 +529,18 @@ impl Event {
         } else {
             None
         };
-        
+
+        let id = Self::compute_id(
+            &event_type,
+            &parent_ids,
+            &EventPayload::None,
+            &None,
+            &subnet_id,
+            &vlc_snapshot,
+            &creator,
+            timestamp,
+        );
+
         Self {
             id,
             event_type,
@@ -553,22 +563,48 @@ impl Event {
 
     /// Canonical id of the chain's genesis event.
     ///
+    /// Deploy/upgrade note (V1 → V2 coordinated upgrade): V2 IDs
+    /// (`SETU_EVENT_ID_V2`, full content binding) are NOT wire-compatible
+    /// with V1 IDs — `verify_id()` accepts V2 only, so V1-issued events,
+    /// V1 genesis IDs, and V1 peers are rejected after this change rolls
+    /// out. This is intentional for a pre-mainnet testnet (no V1 history
+    /// to preserve): all validators must upgrade together; mixed-version
+    /// networks will fork at admission. Do NOT add V1 fallback acceptance
+    /// without a replay analysis (a V1 ID binds almost nothing and would
+    /// re-open payload substitution).
     /// The validator builds the genesis event deterministically
     /// (`setu-validator/src/main.rs`): empty `parent_ids`, fixed creator
-    /// `"genesis"`, `timestamp = 0`, and `logical_time = 0`. `compute_id` hashes
-    /// exactly those four inputs, so the genesis event id is a fixed,
-    /// chain-independent constant
-    /// (`691c8dd61cdc0391ae5414ce9b6ac9be3ef205ba61daa9cb58dc0b3989e0dd6d`).
+    /// `"genesis"`, `timestamp = 0`, and `logical_time = 0`. `compute_id`
+    /// binds the full content (type, parents, payload, transfer, subnet,
+    /// VLC, creator, timestamp), so the genesis event id is a fixed,
+    /// chain-independent constant as long as the genesis content is fixed.
     ///
     /// Task preparation uses this to drop the genesis parent edge from a
     /// never-moved coin before `compute_id`, preventing `ParentTooOld` once the
     /// DAG depth floor advances past `max_cross_cf_depth`. See
     /// `docs/feat/fix-transfer-parent-too-old/design.md`.
     pub fn genesis_event_id() -> EventId {
-        // `logical_time = 0` is the only vlc field that feeds `compute_id`.
+        // Genesis content: type Genesis, no parents/payload/transfer,
+        // subnet ROOT (inferred by `new()` for root event types),
+        // creator "genesis", timestamp 0, zeroed VLC. All other VLC fields
+        // are zero by construction. The submitted genesis event MUST match
+        // this shell exactly (no payload: `setu-validator/src/main.rs`
+        // submits genesis without `EventPayload::Genesis` so the ID stays a
+        // chain-independent constant that the task-preparer parent filter
+        // can rely on; execution state rides in `execution_result` instead).
         let mut vlc = VLCSnapshot::new();
         vlc.logical_time = 0;
-        Self::compute_id(&[], &vlc, "genesis", 0)
+        vlc.physical_time = 0;
+        Self::compute_id(
+            &EventType::Genesis,
+            &[],
+            &EventPayload::None,
+            &None,
+            &Some(crate::subnet::SubnetId::ROOT),
+            &vlc,
+            "genesis",
+            0,
+        )
     }
     
     /// Create a transfer event
@@ -581,6 +617,7 @@ impl Event {
         let mut event = Self::new(EventType::Transfer, parent_ids, vlc_snapshot, creator);
         event.transfer = Some(transfer.clone());
         event.payload = EventPayload::Transfer(transfer);
+        event.recompute_id();
         event
     }
     
@@ -593,6 +630,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::ValidatorRegister, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::ValidatorRegister(registration);
+        event.recompute_id();
         event
     }
     
@@ -605,6 +643,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::SolverRegister, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::SolverRegister(registration);
+        event.recompute_id();
         event
     }
     
@@ -617,6 +656,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::ValidatorUnregister, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::ValidatorUnregister(unregistration);
+        event.recompute_id();
         event
     }
     
@@ -629,6 +669,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::SolverUnregister, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::SolverUnregister(unregistration);
+        event.recompute_id();
         event
     }
     
@@ -641,6 +682,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::PowerConsume, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::PowerConsume(consumption);
+        event.recompute_id();
         event
     }
     
@@ -653,6 +695,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::TaskSubmit, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::TaskSubmit(task);
+        event.recompute_id();
         event
     }
     
@@ -665,6 +708,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::SubnetRegister, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::SubnetRegister(registration);
+        event.recompute_id();
         event
     }
     
@@ -677,6 +721,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::UserRegister, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::UserRegister(registration);
+        event.recompute_id();
         event
     }
 
@@ -689,6 +734,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::ContractCall, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::MoveCall(payload);
+        event.recompute_id();
         event
     }
 
@@ -704,6 +750,7 @@ impl Event {
     ) -> Self {
         let mut event = Self::new(EventType::ContractCall, parent_ids, vlc_snapshot, creator);
         event.payload = EventPayload::MovePtb(payload);
+        event.recompute_id();
         event
     }
 
@@ -746,22 +793,96 @@ impl Event {
         event
     }
 
+    /// Compute the event ID as a binding commitment to the full event content.
+    ///
+    /// Bound inputs: event type, sorted parent IDs, canonical payload JSON,
+    /// canonical legacy-transfer JSON, subnet ID, full VLC snapshot (logical
+    /// time, physical time, sorted vector-clock entries), creator, timestamp.
+    ///
+    /// NOT bound (mutable post-creation): `status`, `execution_result`.
+    ///
+    /// Two hardening notes:
+    /// - `parent_ids` are sorted before hashing: the DAG edge SET is what
+    ///   matters, and peers may supply the same parents in different order.
+    /// - Payload/transfer are hashed via canonical JSON (object keys sorted
+    ///   recursively): BCS/JSON struct encoding of nested `HashMap`s would
+    ///   otherwise make IDs nondeterministic across replicas. Previously the
+    ///   payload was not hashed at all, so `verify_id()` (the network
+    ///   anti-tampering gate) passed after arbitrary payload substitution.
     fn compute_id(
+        event_type: &EventType,
         parent_ids: &[EventId],
+        payload: &EventPayload,
+        transfer: &Option<Transfer>,
+        subnet_id: &Option<crate::subnet::SubnetId>,
         vlc_snapshot: &VLCSnapshot,
         creator: &str,
         timestamp: u64,
     ) -> EventId {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"SETU_EVENT_ID:");
-        for parent_id in parent_ids {
+        hasher.update(b"SETU_EVENT_ID_V2:");
+        hasher.update(event_type.name().as_bytes());
+        let mut sorted_parents: Vec<&EventId> = parent_ids.iter().collect();
+        sorted_parents.sort();
+        for parent_id in sorted_parents {
             hasher.update(parent_id.as_bytes());
         }
+        hasher.update(Self::canonical_json(payload).as_bytes());
+        hasher.update(Self::canonical_json(transfer).as_bytes());
+        // Bind the FULL 32-byte subnet ID with an explicit presence tag.
+        // `SubnetId::Display` emits only the first 8 bytes: distinct subnets
+        // sharing a displayed prefix would otherwise contribute identical
+        // bytes and verify_id would not bind the event to its subnet.
+        match subnet_id.as_ref() {
+            Some(s) => {
+                hasher.update(&[1u8]);
+                hasher.update(s.as_bytes());
+            }
+            None => {
+                hasher.update(&[0u8]);
+            }
+        }
         hasher.update(&vlc_snapshot.logical_time.to_le_bytes());
+        hasher.update(&vlc_snapshot.physical_time.to_le_bytes());
+        for (node_id, time) in vlc_snapshot.vector_clock.sorted_entries() {
+            hasher.update(node_id.as_bytes());
+            hasher.update(&time.to_le_bytes());
+        }
         hasher.update(creator.as_bytes());
         hasher.update(&timestamp.to_le_bytes());
         hex::encode(hasher.finalize().as_bytes())
     }
+
+    /// Canonical JSON encoding with recursively sorted object keys.
+    ///
+    /// `serde_json::to_string` emits `HashMap` entries in iteration order,
+    /// which is nondeterministic across runs. Sorting keys makes the ID
+    /// preimage deterministic for identical content.
+    fn canonical_json<T: serde::Serialize>(value: &T) -> String {
+        let json = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+        serde_json::to_string(&Self::sort_json_keys(json)).unwrap_or_default()
+    }
+
+/// Recursively sort all JSON object keys for deterministic hashing.
+fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::with_capacity(map.len());
+            for key in keys {
+                if let Some(v) = map.get(&key) {
+                    sorted.insert(key, Self::sort_json_keys(v.clone()));
+                }
+            }
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(Self::sort_json_keys).collect())
+        }
+        other => other,
+    }
+}
     
     /// Verify that the event ID matches the content (anti-tampering check)
     /// 
@@ -771,7 +892,11 @@ impl Event {
     /// Returns `true` if the ID is valid, `false` if tampered.
     pub fn verify_id(&self) -> bool {
         let computed = Self::compute_id(
+            &self.event_type,
             &self.parent_ids,
+            &self.payload,
+            &self.transfer,
+            &self.subnet_id,
             &self.vlc_snapshot,
             &self.creator,
             self.timestamp,
@@ -781,11 +906,17 @@ impl Event {
 
     /// Recompute and update the event ID based on current fields.
     ///
-    /// Must be called after modifying `creator`, `timestamp`, or `vlc_snapshot`
-    /// to keep the ID consistent. Used for deterministic genesis events.
+    /// Must be called after modifying any ID-bound field (`event_type`,
+    /// `parent_ids`, `payload`, `transfer`, `subnet_id`, `creator`,
+    /// `timestamp`, `vlc_snapshot`) to keep the ID consistent. Used for
+    /// deterministic genesis events and local event builders.
     pub fn recompute_id(&mut self) {
         self.id = Self::compute_id(
+            &self.event_type,
             &self.parent_ids,
+            &self.payload,
+            &self.transfer,
+            &self.subnet_id,
             &self.vlc_snapshot,
             &self.creator,
             self.timestamp,
@@ -796,12 +927,16 @@ impl Event {
     pub fn with_transfer(mut self, transfer: Transfer) -> Self {
         self.transfer = Some(transfer.clone());
         self.payload = EventPayload::Transfer(transfer);
+        // Content changed -> re-seal so verify_id() holds for locally built events.
+        self.recompute_id();
         self
     }
-    
+
     /// Set payload
     pub fn with_payload(mut self, payload: EventPayload) -> Self {
         self.payload = payload;
+        // Content changed -> re-seal so verify_id() holds for locally built events.
+        self.recompute_id();
         self
     }
 
@@ -860,6 +995,8 @@ impl Event {
     /// Set the subnet for this event
     pub fn with_subnet(mut self, subnet_id: crate::subnet::SubnetId) -> Self {
         self.subnet_id = Some(subnet_id);
+        // Subnet is ID-bound -> re-seal so verify_id() holds.
+        self.recompute_id();
         self
     }
     
@@ -1020,14 +1157,20 @@ mod tests {
 
     /// Guards the genesis-parent-drop fix
     /// (docs/feat/fix-transfer-parent-too-old). `Event::genesis_event_id()` must
-    /// equal both the literal id observed on testnet and an event built exactly
-    /// the way the validator builds genesis. If genesis construction in main.rs
-    /// ever changes (creator/timestamp/logical_time), this test fails loudly so
+    /// equal both the literal id pinned here and an event built exactly
+    /// the way the validator builds genesis (shell: no payload, creator
+    /// "genesis", timestamp 0, zeroed VLC, subnet ROOT). If genesis
+    /// construction in main.rs ever changes, this test fails loudly so
     /// the task-preparer filter does not silently stop matching.
+    /// NOTE: the literal below is the V2 content-bound ID (event type,
+    /// payload, transfer, subnet, full VLC are all hashed); the pre-V2
+    /// literal was `691c8dd6...0dd6d` which bound only
+    /// (parents, logical_time, creator, timestamp) and let payload
+    /// substitution pass `verify_id()`.
     #[test]
     fn test_genesis_event_id_is_canonical_constant() {
         const EXPECTED: &str =
-            "691c8dd61cdc0391ae5414ce9b6ac9be3ef205ba61daa9cb58dc0b3989e0dd6d";
+            "77dd9101b09d9c5f89c2b55fe17a77a40ea85ef76151d337d7ba8e8c19ca649b";
         assert_eq!(Event::genesis_event_id(), EXPECTED);
 
         // Mirror setu-validator/src/main.rs genesis construction.
