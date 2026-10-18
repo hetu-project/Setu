@@ -58,6 +58,7 @@ impl GovernanceExecutor {
             creator,
         );
         event.payload = EventPayload::Governance(payload);
+        event.recompute_id(); // Seal content-bound ID before submission (verify_id gate)
         event.set_execution_result(ExecutionResult::success().with_changes(state_changes));
 
         Ok(event)
@@ -107,6 +108,7 @@ impl GovernanceExecutor {
             creator,
         );
         event.payload = EventPayload::Governance(payload);
+        event.recompute_id(); // Seal content-bound ID before submission (verify_id gate)
         event.set_execution_result(ExecutionResult::success().with_changes(state_changes));
 
         Ok(event)
@@ -194,6 +196,7 @@ impl GovernanceExecutor {
             creator,
         );
         event.payload = EventPayload::Governance(payload);
+        event.recompute_id(); // Seal content-bound ID before submission (verify_id gate)
         event.set_execution_result(ExecutionResult::success().with_changes(state_changes));
 
         Ok(event)

@@ -358,7 +358,13 @@ impl<S: StateStore> RuntimeExecutor<S> {
                 from = %tx.sender,
                 to = %recipient,
                 amount = amount,
-                remaining = coin.data.balance.value() - amount,
+                // saturating_sub: this log line is evaluated BEFORE the
+                // withdraw() sufficiency check below. A plain `-` underflows
+                // and panics in debug builds on amount > balance, turning a
+                // crafted over-balance transfer into a remote-triggerable
+                // crash instead of a clean InsufficientBalance path
+                // (withdraw() returns Err; saturating display is log-only).
+                remaining = coin.data.balance.value().saturating_sub(amount),
                 "Partial transfer (always-create-new)"
             );
             
@@ -1042,12 +1048,18 @@ impl<S: StateStore> RuntimeExecutor<S> {
         
         let target_old_state = target.to_coin_state_bytes();
         let target_coin_type = target.data.coin_type.clone();
-        
-        // 2. Merge source coins one by one
+
+        // 2a. Validation pass (read-only): check every source's ownership
+        // and type, and pre-compute the merged total with checked
+        // arithmetic. A previous version deposited source-by-source and
+        // could fail mid-loop on balance overflow AFTER deleting earlier
+        // sources — a non-atomic merge that destroyed coins. Failing here
+        // leaves state untouched.
+        let mut merged_total = target.data.balance.value();
         for &source_id in source_coin_ids {
             let source = self.state.get_object(&source_id)?
                 .ok_or(RuntimeError::ObjectNotFound(source_id))?;
-            
+
             let source_owner = source.metadata.owner.as_ref()
                 .ok_or(RuntimeError::InvalidOwnership {
                     object_id: source_id,
@@ -1058,19 +1070,58 @@ impl<S: StateStore> RuntimeExecutor<S> {
                     format!("Source coin {} not owned by {}", source_id, owner)
                 ));
             }
-            
+
             if source.data.coin_type != target_coin_type {
                 return Err(RuntimeError::InvalidTransaction(
                     format!("Coin type mismatch: target={}, source={}",
                         target_coin_type, source.data.coin_type)
                 ));
             }
-            
+
+            merged_total = merged_total.checked_add(source.data.balance.value())
+                .ok_or(RuntimeError::InvalidTransaction(
+                    "Merge would overflow target balance".into()
+                ))?;
+        }
+
+        // 2b. Mutation pass. Validation above removes every known failure
+        // mode, but a `StateStore` write can still fail. There is no
+        // transaction API, so snapshot the affected objects and roll back
+        // on any error: a failed merge must never leave sources deleted
+        // without the merged target update.
+        let target_backup = target.clone();
+        let mut source_backups: Vec<(ObjectId, Object<CoinData>)> =
+            Vec::with_capacity(source_coin_ids.len());
+        for &source_id in source_coin_ids {
+            let source = self.state.get_object(&source_id)?
+                .ok_or(RuntimeError::ObjectNotFound(source_id))?;
+            source_backups.push((source_id, source));
+        }
+
+        let mut mutation_error: Option<RuntimeError> = None;
+        for &source_id in source_coin_ids {
+            let source = match self.state.get_object(&source_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    mutation_error = Some(RuntimeError::ObjectNotFound(source_id));
+                    break;
+                }
+                Err(e) => {
+                    mutation_error = Some(e);
+                    break;
+                }
+            };
+
             let source_old_state = source.to_coin_state_bytes();
-            target.data.balance.deposit(source.data.balance)
-                .map_err(|e| RuntimeError::InvalidTransaction(e))?;
-            
-            self.state.delete_object(&source_id)?;
+            if let Err(e) = target.data.balance.deposit(source.data.balance) {
+                mutation_error = Some(RuntimeError::InvalidTransaction(e));
+                break;
+            }
+
+            if let Err(e) = self.state.delete_object(&source_id) {
+                mutation_error = Some(e);
+                break;
+            }
             deleted_objects.push(source_id);
             state_changes.push(StateChange {
                 change_type: StateChangeType::Delete,
@@ -1079,18 +1130,42 @@ impl<S: StateStore> RuntimeExecutor<S> {
                 new_state: None,
             });
         }
-        
+
         // 3. Update target coin
-        target.increment_version();
-        let target_new_state = target.to_coin_state_bytes();
-        self.state.set_object(target_coin_id, target)?;
-        
-        state_changes.insert(0, StateChange {
-            change_type: StateChangeType::Update,
-            object_id: target_coin_id,
-            old_state: Some(target_old_state),
-            new_state: Some(target_new_state),
-        });
+        if mutation_error.is_none() {
+            target.increment_version();
+            let target_new_state = target.to_coin_state_bytes();
+            state_changes.insert(0, StateChange {
+                change_type: StateChangeType::Update,
+                object_id: target_coin_id,
+                old_state: Some(target_old_state),
+                new_state: Some(target_new_state),
+            });
+            if let Err(e) = self.state.set_object(target_coin_id, target) {
+                mutation_error = Some(e);
+            }
+        }
+
+        if let Some(e) = mutation_error {
+            // Best-effort rollback: restore every snapshot taken above.
+            for (id, obj) in source_backups {
+                if let Err(restore_err) = self.state.set_object(id, obj) {
+                    tracing::error!(
+                        object_id = %id,
+                        error = %restore_err,
+                        "merge rollback failed to restore source coin"
+                    );
+                }
+            }
+            if let Err(restore_err) = self.state.set_object(target_coin_id, target_backup) {
+                tracing::error!(
+                    object_id = %target_coin_id,
+                    error = %restore_err,
+                    "merge rollback failed to restore target coin"
+                );
+            }
+            return Err(e);
+        }
         
         Ok(ExecutionOutput {
             success: true,
@@ -1168,36 +1243,18 @@ impl<S: StateStore> RuntimeExecutor<S> {
         
         let is_exact_split = source.data.balance.value() == total_split;
         
-        // 2. Create new coins
-        for &amount in amounts {
-            let new_coin_id = ctx.new_coin_id();
-            let new_coin = create_coin_with_id(
-                new_coin_id,
-                owner.clone(),
-                amount,
-                source.data.coin_type.as_str(),
-                ctx.timestamp,
-            );
-            let new_coin_state = new_coin.to_coin_state_bytes();
-            
-            self.state.set_object(new_coin_id, new_coin)?;
-            created_objects.push(new_coin_id);
-            
-            state_changes.push(StateChange {
-                change_type: StateChangeType::Create,
-                object_id: new_coin_id,
-                old_state: None,
-                new_state: Some(new_coin_state),
-            });
-            
-            let _ = source.data.balance.withdraw(amount)
-                .map_err(|e| RuntimeError::InvalidTransaction(e))?;
-        }
-        
-        // 3. Handle source coin
+        // 2. Handle source coin FIRST (consume before creating new coins).
+        // Creating outputs can still fail after the source was consumed
+        // (no transaction API), so snapshot the source and roll back the
+        // whole operation if any later write fails.
+        let source_backup = source.clone();
+        let coin_type = source.data.coin_type.clone();
         if is_exact_split {
             // Exact split: delete source coin (prevent 0-balance zombie)
-            self.state.delete_object(&source_coin_id)?;
+            if let Err(e) = self.state.delete_object(&source_coin_id) {
+                let _ = self.state.set_object(source_coin_id, source_backup);
+                return Err(e);
+            }
             deleted_objects.push(source_coin_id);
             state_changes.insert(0, StateChange {
                 change_type: StateChangeType::Delete,
@@ -1206,15 +1263,59 @@ impl<S: StateStore> RuntimeExecutor<S> {
                 new_state: None,
             });
         } else {
-            // Partial split: update source coin
+            // Partial split: withdraw from source before updating
+            for &amount in amounts {
+                source.data.balance.withdraw(amount)
+                    .map_err(|e| RuntimeError::InvalidTransaction(e))?;
+            }
             source.increment_version();
             let source_new_state = source.to_coin_state_bytes();
-            self.state.set_object(source_coin_id, source)?;
+            if let Err(e) = self.state.set_object(source_coin_id, source.clone()) {
+                let _ = self.state.set_object(source_coin_id, source_backup);
+                return Err(e);
+            }
             state_changes.insert(0, StateChange {
                 change_type: StateChangeType::Update,
                 object_id: source_coin_id,
                 old_state: Some(source_old_state),
                 new_state: Some(source_new_state),
+            });
+        }
+        
+        // 3. Create new coins
+        for &amount in amounts {
+            let new_coin_id = ctx.new_coin_id();
+            let new_coin = create_coin_with_id(
+                new_coin_id,
+                owner.clone(),
+                amount,
+                coin_type.as_str(),
+                ctx.timestamp,
+            );
+            let new_coin_state = new_coin.to_coin_state_bytes();
+            
+            if let Err(e) = self.state.set_object(new_coin_id, new_coin) {
+                // Roll back: remove outputs created so far and restore the
+                // source coin to its pre-split state.
+                for created in &created_objects {
+                    let _ = self.state.delete_object(created);
+                }
+                if let Err(restore_err) = self.state.set_object(source_coin_id, source_backup) {
+                    tracing::error!(
+                        object_id = %source_coin_id,
+                        error = %restore_err,
+                        "split rollback failed to restore source coin"
+                    );
+                }
+                return Err(e);
+            }
+            created_objects.push(new_coin_id);
+            
+            state_changes.push(StateChange {
+                change_type: StateChangeType::Create,
+                object_id: new_coin_id,
+                old_state: None,
+                new_state: Some(new_coin_state),
             });
         }
         
@@ -1302,6 +1403,77 @@ mod tests {
         assert_eq!(new_coin.metadata.owner.unwrap(), recipient);
     }
     
+    /// Over-balance transfers must return an error, never panic.
+    ///
+    /// The partial-transfer `debug!` log line evaluates `balance - amount`
+    /// BEFORE `withdraw()` runs its sufficiency check. A plain subtraction
+    /// underflows and panics in debug builds, turning a crafted transfer
+    /// (amount > balance) into a remote-triggerable crash. The log uses
+    /// `saturating_sub`; this test locks in the Err path.
+    #[test]
+    fn test_over_balance_transfer_returns_error_not_panic() {
+        let mut store = InMemoryStateStore::new();
+        let sender = Address::from_str_id("alice");
+        let recipient = Address::from_str_id("bob");
+
+        let coin = setu_types::create_coin(sender.clone(), 100);
+        let coin_id = *coin.id();
+        store.set_object(coin_id, coin).unwrap();
+
+        let mut executor = RuntimeExecutor::new(store);
+        let tx = Transaction::new_transfer(sender.clone(), coin_id, recipient.clone(), Some(300));
+        let ctx = test_ctx("over-balance-transfer");
+
+        let result = executor.execute_transaction(&tx, &ctx);
+        assert!(result.is_err(), "over-balance transfer must fail, got {:?}", result);
+
+        // Source coin untouched.
+        let coin = executor.state().get_object(&coin_id).unwrap().unwrap();
+        assert_eq!(coin.data.balance.value(), 100);
+    }
+
+    /// Merge overflow must be atomic: if the merged total overflows u64,
+    /// NO source may be deleted and the target must be unchanged.
+    ///
+    /// The old single-loop implementation deposited source-by-source and
+    /// could fail mid-loop AFTER deleting earlier sources, destroying
+    /// coins. The validation pass now pre-computes the total with checked
+    /// arithmetic before mutating anything.
+    #[test]
+    fn test_merge_overflow_is_atomic() {
+        let mut store = InMemoryStateStore::new();
+        let owner = Address::from_str_id("alice");
+
+        let target = setu_types::create_coin(owner.clone(), u64::MAX - 10);
+        let target_id = *target.id();
+        store.set_object(target_id, target).unwrap();
+
+        let s1 = setu_types::create_coin(owner.clone(), 5);
+        let s1_id = *s1.id();
+        store.set_object(s1_id, s1).unwrap();
+
+        let s2 = setu_types::create_coin(owner.clone(), 10);
+        let s2_id = *s2.id();
+        store.set_object(s2_id, s2).unwrap();
+
+        let mut executor = RuntimeExecutor::new(store);
+        let ctx = test_ctx("merge-overflow-atomic");
+
+        // (MAX-10) + 5 + 10 overflows u64.
+        let result = executor.execute_merge_coins(&owner, target_id, &[s1_id, s2_id], &ctx);
+        assert!(result.is_err(), "overflowing merge must fail, got {:?}", result);
+
+        // Nothing mutated: target unchanged, both sources intact.
+        let target = executor.state().get_object(&target_id).unwrap().unwrap();
+        assert_eq!(target.data.balance.value(), u64::MAX - 10);
+        assert!(executor.state().get_object(&s1_id).unwrap().is_some());
+        assert!(executor.state().get_object(&s2_id).unwrap().is_some());
+        let s1 = executor.state().get_object(&s1_id).unwrap().unwrap();
+        let s2 = executor.state().get_object(&s2_id).unwrap().unwrap();
+        assert_eq!(s1.data.balance.value(), 5);
+        assert_eq!(s2.data.balance.value(), 10);
+    }
+
     /// Balance conservation: sum of all balances must be unchanged after any transfer.
     #[test]
     fn test_balance_conservation_full_transfer() {

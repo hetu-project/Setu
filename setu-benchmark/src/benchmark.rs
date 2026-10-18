@@ -798,8 +798,15 @@ impl BenchmarkRunner {
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let counter = Arc::new(AtomicU64::new(0));
 
-        // Calculate number of batches
-        let num_batches = (total + batch_size - 1) / batch_size;
+        // Calculate number of batches (guard against batch_size == 0)
+        let num_batches = if batch_size == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("batch_size must be > 0, got {batch_size}"),
+            ).into());
+        } else {
+            (total + batch_size - 1) / batch_size
+        };
         info!(
             "Burst batch mode: {} total requests in {} batches of {} (concurrency: {})",
             total, num_batches, batch_size, concurrency

@@ -85,6 +85,19 @@ impl InMemoryStateStore {
             raw_objects: HashMap::new(),
         }
     }
+
+    /// Access the raw object storage for state root computation.
+    pub fn raw_objects(&self) -> &HashMap<ObjectId, Vec<u8>> {
+        &self.raw_objects
+    }
+
+    /// Access all coin objects for state root computation.
+    ///
+    /// `raw_objects()` alone misses coins (stored in `objects`), so a root
+    /// over raw bytes only would not change on transfers/merges/splits.
+    pub fn objects(&self) -> &HashMap<ObjectId, Object<CoinData>> {
+        &self.objects
+    }
     
     /// Update ownership index (O(1) amortized via reverse index)
     fn update_ownership_index(&mut self, object_id: ObjectId, new_owner: &Address) {
@@ -199,6 +212,25 @@ impl InMemoryObjectStore {
             ownership_index: HashMap::new(),
             object_owner: HashMap::new(),
         }
+    }
+
+    /// Access the raw key-value storage for state root computation.
+    pub fn raw(&self) -> &HashMap<String, Vec<u8>> {
+        &self.raw
+    }
+
+    /// Access object envelopes for state root computation.
+    ///
+    /// `raw()` holds only module/linkage bytes; Move objects live in
+    /// `envelopes` and must be hashed too, or object writes would not
+    /// change the attested root.
+    pub fn envelopes(&self) -> &HashMap<ObjectId, ObjectEnvelope> {
+        &self.envelopes
+    }
+
+    /// Access type-agnostic raw object bytes for state root computation.
+    pub fn raw_objects(&self) -> &HashMap<ObjectId, Vec<u8>> {
+        &self.raw_objects
     }
 
     fn remove_from_ownership_index(&mut self, id: &ObjectId) {

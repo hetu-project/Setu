@@ -2583,6 +2583,11 @@ mod tests {
 
     /// Build a success-result event with a fixed id, a specific logical_time,
     /// and a set of state-change keys targeting `subnet`.
+    ///
+    /// NOTE: the synthetic `id` is assigned AFTER `with_subnet` on purpose:
+    /// `with_subnet` re-seals the content-bound event ID, which would
+    /// overwrite the controlled fake IDs ("aaa"/"zzz", "e1"/"e2") these
+    /// tie-break tests depend on.
     fn gamma_make_event(id: &str, subnet: SubnetId, logical_time: u64, keys: &[&str]) -> Event {
         let mut ev = Event::new(
             EventType::Transfer,
@@ -2590,9 +2595,9 @@ mod tests {
             VLCSnapshot::default(),
             "creator".to_string(),
         );
-        ev.id = id.to_string();
         ev.vlc_snapshot.logical_time = logical_time;
         ev = ev.with_subnet(subnet);
+        ev.id = id.to_string();
         let state_changes: Vec<StateChange> = keys
             .iter()
             .map(|k| StateChange {
@@ -2757,15 +2762,17 @@ mod tests {
     #[test]
     fn gamma_governance_target_subnet_unification() {
         // E1: subnet=ROOT, explicit target_subnet=GOVERNANCE for its state_change
+        // (synthetic id assigned after with_subnet: with_subnet re-seals the
+        // content-bound ID and would overwrite the controlled "e1".)
         let mut e1 = Event::new(
             EventType::Governance,
             vec![],
             VLCSnapshot::default(),
             "creator".to_string(),
         );
-        e1.id = "e1".to_string();
         e1.vlc_snapshot.logical_time = 1;
         e1 = e1.with_subnet(SubnetId::ROOT);
+        e1.id = "e1".to_string();
         e1.execution_result = Some(ExecutionResult {
             success: true,
             message: None,

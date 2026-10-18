@@ -90,6 +90,9 @@ pub struct ValidatorInfo {
     pub node: NodeInfo,
     pub is_leader: bool,
     pub leader_round: u64,
+    /// Signature over node.id to authenticate validator membership changes.
+    /// Must be verified by ValidatorSet::add_validator before adding.
+    pub signature: Vec<u8>,
 }
 
 impl ValidatorInfo {
@@ -98,7 +101,41 @@ impl ValidatorInfo {
             node,
             is_leader,
             leader_round: 0,
+            signature: Vec::new(),
         }
+    }
+    
+    /// Create a ValidatorInfo with a signature authenticating the node ID.
+    pub fn with_signature(mut self, signature: Vec<u8>) -> Self {
+        self.signature = signature;
+        self
+    }
+    
+    /// Verify the validator's signature over the node ID.
+    ///
+    /// Fails closed: an EMPTY signature is rejected. Treating it as
+    /// "trusted" let an unsigned peer enter the consensus membership set
+    /// via `add_peer_validator` (audit #45 follow-up). Genesis / local
+    /// configuration records must use the explicit trusted admission path
+    /// (`ValidatorSet::add_trusted_validator`) instead of forging a pass
+    /// through this check.
+    pub fn verify(&self) -> Result<(), &'static str> {
+        if self.signature.is_empty() {
+            return Err("missing validator signature");
+        }
+        if self.node.public_key.len() != 32 {
+            return Err("invalid public key length");
+        }
+        // Verify signature against node.id using the validator's public key
+        use ed25519_dalek::{VerifyingKey, Verifier, Signature};
+        let sig = Signature::try_from(self.signature.as_slice())
+            .map_err(|_| "invalid signature format")?;
+        let pk_bytes: &[u8; 32] = self.node.public_key.as_slice()
+            .try_into().map_err(|_| "invalid public key length")?;
+        let pk = VerifyingKey::from_bytes(pk_bytes)
+            .map_err(|_| "invalid public key format")?;
+        pk.verify(self.node.id.as_bytes(), &sig)
+            .map_err(|_| "invalid validator signature")
     }
 }
 
@@ -177,5 +214,15 @@ mod tests {
         
         solver.current_load = 30;
         assert_eq!(solver.available_capacity(), 20);
+    }
+
+    /// Fail-closed membership admission: an unsigned record must NOT pass
+    /// verification (it previously returned Ok and let unsigned peers into
+    /// the consensus set via add_peer_validator).
+    #[test]
+    fn test_validator_info_rejects_empty_signature() {
+        let node = NodeInfo::new_validator("v1".to_string(), "127.0.0.1".to_string(), 8000);
+        let info = ValidatorInfo::new(node, false);
+        assert_eq!(info.verify(), Err("missing validator signature"));
     }
 }

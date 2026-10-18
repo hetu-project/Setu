@@ -60,6 +60,21 @@ impl InfraExecutor {
         }
     }
 
+    /// Canonical storage key for module bytecode: `mod:{short}::{name}`.
+    ///
+    /// The address MUST use zero-stripped `to_hex_literal()` — every reader
+    /// (`SetuModuleResolver::module_key`, service lookups, mock-TEE
+    /// `ModuleChange` writer, task-preparer dependency scan) builds keys in
+    /// this form. A padded 64-hex address writes a key no reader ever looks
+    /// up (upgrades silently lost). Single source of truth: all writers here
+    /// must go through this helper.
+    pub(crate) fn module_storage_key(
+        addr: &move_core_types::account_address::AccountAddress,
+        name: &str,
+    ) -> String {
+        format!("mod:{}::{}", addr.to_hex_literal(), name)
+    }
+
     /// Execute a SubnetRegister event
     ///
     /// This creates a subnet and optionally mints initial tokens to the owner.
@@ -287,10 +302,9 @@ impl InfraExecutor {
             verify_module_unmetered(&compiled)
                 .map_err(|e| format!("Bytecode verification failed: {}", e))?;
 
-            // 3. Build "mod:{addr}::{name}" key
-            let module_addr = compiled.self_id().address().to_hex_literal();
+            // 3. Build "mod:{addr}::{name}" key (short form via helper).
             let module_name = compiled.self_id().name().to_string();
-            let module_key = format!("mod:{}::{}", module_addr, module_name);
+            let module_key = Self::module_storage_key(compiled.self_id().address(), &module_name);
 
             // B5: assert all modules in the bundle share the same self-address
             // (= family_id at publish time). Mixed-address bundles are rejected
@@ -491,8 +505,11 @@ impl InfraExecutor {
             let relinked_module = CompiledModule::deserialize_with_defaults(&relinked)
                 .map_err(|e| format!("Relinked module deserialize: {}", e))?;
             let module_name = relinked_module.self_id().name().to_string();
-            let new_addr_hex = format!("0x{}", hex::encode(new_addr_bytes));
-            let module_key = format!("mod:{}::{}", new_addr_hex, module_name);
+            // Storage key MUST use `to_hex_literal()` (zero-stripped short
+            // form). Every reader — resolver (`SetuModuleResolver::module_key`),
+            // Storage key via the canonical helper (short hex literal —
+            // the only form every module reader understands).
+            let module_key = Self::module_storage_key(&new_account, &module_name);
 
             // ABI compatibility check — mirrors
             // `engine.rs::lower_upgrade_inline`. Without this, the legacy
@@ -1385,6 +1402,83 @@ mod tests {
         assert!(
             err.contains("no prior entry under prev_addr"),
             "wrong error: {err}"
+        );
+    }
+
+    /// Regression: the legacy upgrade writer used padded
+    /// `format!("0x{}", hex::encode(..))` for the `mod:` state key while
+    /// every reader (`SetuModuleResolver::module_key`, service lookups,
+    /// mock-TEE writer) uses zero-stripped `to_hex_literal()`. Upgraded
+    /// modules were written under keys no reader ever looks up — upgrades
+    /// silently lost. The emitted key must be the resolver-compatible
+    /// short form.
+    #[test]
+    fn test_execute_move_upgrade_emits_short_form_module_key() {
+        let shared = Arc::new(SharedStateManager::new(GlobalStateManager::new()));
+        let provider = Arc::new(MerkleStateProvider::new(Arc::clone(&shared)));
+        let executor = InfraExecutor::new("validator-1".to_string(), Arc::clone(&provider));
+
+        let addr = move_core_types::account_address::AccountAddress::from_hex_literal("0xdead")
+            .expect("valid addr");
+        let module_bytes = make_module_bytes(addr, "counter");
+        seed_published_v0(&shared, addr, "counter", &module_bytes);
+
+        let family = setu_types::object::ObjectId::new(addr.into_bytes());
+        let event = executor
+            .execute_move_upgrade(
+                "0xc0a6c424ac7157ae408398df7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+                family,
+                &[module_bytes],
+                vec![],
+                test_vlc(),
+            )
+            .expect("self-replace upgrade must succeed");
+        let er = event.execution_result.as_ref().unwrap();
+        let mod_key = er
+            .state_changes
+            .iter()
+            .find(|sc| sc.key.starts_with("mod:"))
+            .expect("upgrade must emit a mod: write")
+            .key
+            .clone();
+
+        // Recompute the expected new package address exactly like the writer:
+        // blake3("SETU_PKG_VER:" || family || version=1u64le).
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"SETU_PKG_VER:");
+        hasher.update(family.as_bytes());
+        hasher.update(&1u64.to_le_bytes());
+        let new_account =
+            move_core_types::account_address::AccountAddress::new(*hasher.finalize().as_bytes());
+        let expected = format!("mod:{}::counter", new_account.to_hex_literal());
+        assert_eq!(
+            mod_key, expected,
+            "upgrade mod key must use short hex literal readable by the resolver"
+        );
+    }
+
+    /// The canonical module key helper must emit zero-stripped addresses.
+    /// `0x1` padded is 64 hex chars; readers (`SetuModuleResolver`,
+    /// service lookups) only ever query the short form, so a padded key
+    /// is a write that can never be read back.
+    #[test]
+    fn test_module_storage_key_uses_short_hex_literal() {
+        use move_core_types::account_address::AccountAddress;
+        let one = AccountAddress::from_hex_literal("0x1").unwrap();
+        assert_eq!(
+            InfraExecutor::module_storage_key(&one, "counter"),
+            "mod:0x1::counter"
+        );
+        let dead = AccountAddress::from_hex_literal("0xdead").unwrap();
+        assert_eq!(
+            InfraExecutor::module_storage_key(&dead, "m"),
+            "mod:0xdead::m"
+        );
+        // Full-length address without leading zeros round-trips unchanged.
+        let full = AccountAddress::new([0xabu8; 32]);
+        assert_eq!(
+            InfraExecutor::module_storage_key(&full, "m"),
+            format!("mod:0x{}::m", "ab".repeat(32))
         );
     }
 }

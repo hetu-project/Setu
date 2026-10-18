@@ -28,4 +28,6 @@ lru = "0.12"
 
 [dev-dependencies]
 setu-types = { path = "../types", features = ["test-utils"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 tokio = { version = "1", features = ["full", "test-util"] }

@@ -188,6 +188,11 @@ pub struct DiscoveryConfig {
     pub max_peers_to_return: usize,
     /// Rate limit for get_known_peers RPC (requests per second)
     pub get_known_peers_rate_limit: Option<u32>,
+    /// Maximum entries in the gossiped known-peers table. Bounds memory:
+    /// without it any peer could grow the table without limit by pushing
+    /// validly-signed entries for attacker-generated keypairs. When full,
+    /// the stalest entry is evicted.
+    pub max_known_peers: usize,
 }
 
 impl Default for DiscoveryConfig {
@@ -199,6 +204,7 @@ impl Default for DiscoveryConfig {
             enable_peer_exchange: true,
             max_peers_to_return: 50,
             get_known_peers_rate_limit: Some(10),
+            max_known_peers: 1024,
         }
     }
 }

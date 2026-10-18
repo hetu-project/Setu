@@ -291,8 +291,21 @@ impl NetworkEventHandler for MessageRouter {
                                     "Fetched missing parent events"
                                 );
                                 
-                                // Add fetched parents to DAG
+                                // Add fetched parents to DAG. Each fetched
+                                // parent MUST pass verify_id like any
+                                // network event: the serving peer is
+                                // untrusted, and an ID-mismatched parent
+                                // accepted here (but rejected by peers that
+                                // got it via broadcast) would split our DAG
+                                // from the network's. Reject loudly.
                                 for parent_event in fetched_events {
+                                    if !parent_event.verify_id() {
+                                        warn!(
+                                            event_id = %parent_event.id,
+                                            "Fetched parent failed ID verification - possible tampering, rejecting"
+                                        );
+                                        continue;
+                                    }
                                     if let Err(e) = self.engine.receive_event_from_network(parent_event).await {
                                         debug!(error = %e, "Failed to add fetched parent (may already exist)");
                                     }
@@ -560,5 +573,33 @@ mod tests {
         let events = engine.get_events_by_ids(&[event_id.clone()]).await;
         assert_eq!(events.len(), 1, "Event should be in DAG");
         assert_eq!(events[0].id, event_id);
+    }
+
+    /// Fetched-parent path must enforce the same anti-tampering gate as
+    /// direct broadcasts: a tampered event (ID no longer matches content
+    /// after the V2 content-binding fix) must never enter the DAG, whether
+    /// it arrives via broadcast or via missing-parent sync.
+    #[tokio::test]
+    async fn test_handle_event_rejects_tampered_event() {
+        let engine = create_test_engine();
+        let (event_store, anchor_store, cf_store) = create_test_stores();
+        let router = MessageRouter::new(engine.clone(), event_store, anchor_store, cf_store);
+
+        let mut event = create_test_event();
+        let event_id = event.id.clone();
+        // Tamper AFTER sealing: swap the payload without re-sealing.
+        event.payload = setu_types::EventPayload::ContractCall {
+            target: "0xevil::x::f".to_string(),
+            args: vec![],
+        };
+        assert!(!event.verify_id(), "sanity: tampered event must fail verify");
+
+        router.handle_event("peer-1".to_string(), event).await;
+
+        let events = engine.get_events_by_ids(&[event_id]).await;
+        assert!(
+            events.is_empty(),
+            "Tampered event must be rejected before DAG admission"
+        );
     }
 }

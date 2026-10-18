@@ -99,34 +99,77 @@ pub async fn handle(action: crate::ValidatorAction, _config: &Config) -> Result<
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as u8;
             
-            // Decode public key
-            let public_key_bytes = hex::decode(&keypair.public_key)?;
-            
-            // Create registration message to sign
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-            let message = format!(
-                "Register Validator: {}:{}:{}",
-                keypair.node_id,
-                keypair.account_address,
-                timestamp
-            );
-            
-            // TODO: Sign the message with private key
-            // For now, use empty signature
-            let signature = vec![];
-            
-            // Create registration request
+            // The key file holds an Ed25519 keypair: it is BOTH the
+            // consensus (vote-signing) key and, via a domain-separated
+            // derivation, the secp256k1 ownership key. Deriving avoids a
+            // second secret in the file while keeping the two identities
+            // cryptographically distinct.
+            let ed_private_bytes = hex::decode(&keypair.private_key)?;
+            let ed_public_bytes = hex::decode(&keypair.public_key)?;
+            if ed_private_bytes.len() != 32 || ed_public_bytes.len() != 32 {
+                anyhow::bail!(
+                    "Validator key file must contain 32-byte Ed25519 keys (got private={}, public={})",
+                    ed_private_bytes.len(),
+                    ed_public_bytes.len()
+                );
+            }
+
+            // Consensus-key proof: sign the node ID with the Ed25519 key so
+            // admission can verify ownership of the vote-signing key.
+            let ed_secret: [u8; 32] = ed_private_bytes.as_slice().try_into().unwrap();
+            let ed_signing_key = ed25519_dalek::SigningKey::from_bytes(&ed_secret);
+            let consensus_signature = {
+                use ed25519_dalek::Signer;
+                ed_signing_key
+                    .sign(keypair.node_id.as_bytes())
+                    .to_bytes()
+                    .to_vec()
+            };
+
+            // secp256k1 ownership key derived deterministically from the
+            // Ed25519 secret.
+            let mut seed_hasher = blake3::Hasher::new();
+            seed_hasher.update(b"SETU_CLI_SECP_KEY_V1:");
+            seed_hasher.update(&ed_private_bytes);
+            let secp_seed = seed_hasher.finalize();
+            let secp_signing_key = k256::ecdsa::SigningKey::from_slice(secp_seed.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Failed to derive secp256k1 key: {e}"))?;
+            let secp_public_key = secp_signing_key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec();
+
+            // Build the registration with the consensus key bound into the
+            // signed identity, then sign with the derived secp256k1 key.
+            let mut registration = setu_types::ValidatorRegistration::new(
+                keypair.node_id.clone(),
+                network_address.clone(),
+                network_port,
+                keypair.account_address.clone(),
+                secp_public_key,
+                vec![],
+                stake_amount,
+            )
+            .with_consensus_key(ed_public_bytes.clone());
+            {
+                use k256::ecdsa::signature::Signer;
+                let digest = setu_types::hash_utils::setu_hash(&registration.signing_message());
+                let sig: k256::ecdsa::Signature = secp_signing_key.sign(&digest);
+                registration.signature = sig.to_bytes().to_vec();
+            }
+
             let request = RegisterValidatorRequest {
                 validator_id: keypair.node_id.clone(),
                 address: network_address.clone(),
                 port: network_port,
                 account_address: keypair.account_address.clone(),
-                public_key: public_key_bytes,
-                signature,
+                public_key: registration.public_key.clone(),
+                signature: registration.signature.clone(),
                 stake_amount,
                 commission_rate,
+                consensus_public_key: ed_public_bytes,
+                consensus_signature,
             };
             
             // Send registration request

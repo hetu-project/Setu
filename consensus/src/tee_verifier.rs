@@ -271,9 +271,13 @@ impl TeeVerifier {
             );
         }
         
-        // Check attestation age
+        // Check attestation age with overflow-safe arithmetic.
+        // `attestation.timestamp` is peer-supplied: `timestamp + max_age`
+        // overflows u64 for timestamps near u64::MAX (wraps in release and
+        // panics in debug), which would let expired attestations through.
+        // `saturating_sub` also treats future timestamps as age 0 (not expired).
         let now = current_timestamp();
-        if now > attestation.timestamp + self.max_attestation_age_ms {
+        if now.saturating_sub(attestation.timestamp) > self.max_attestation_age_ms {
             return VerificationResult::Failed(VerificationError::ExpiredAttestation);
         }
         
@@ -283,8 +287,18 @@ impl TeeVerifier {
             return VerificationResult::Failed(VerificationError::WriteSetMismatch);
         }
         
-        // Check enclave measurement
-        let solver_info = self.solver_registry.get(&attestation.solver_id).unwrap();
+        // Check enclave measurement. The registry was already checked above,
+        // so `get` must return `Some`; map `None` to UnknownSolver instead of
+        // panicking on a TOCTOU/unreachable path (a panic here would be a
+        // remote-triggerable DoS: any peer can submit an attestation).
+        let solver_info = match self.solver_registry.get(&attestation.solver_id) {
+            Some(info) => info,
+            None => {
+                return VerificationResult::Failed(VerificationError::UnknownSolver(
+                    attestation.solver_id.clone(),
+                ))
+            }
+        };
         if attestation.measurement != solver_info.expected_measurement {
             return VerificationResult::Failed(VerificationError::MeasurementMismatch);
         }
@@ -306,12 +320,14 @@ impl TeeVerifier {
     }
 }
 
-/// Get current timestamp in milliseconds
+/// Get current timestamp in milliseconds.
+/// Returns 0 (rather than panicking) if the system clock is before the
+/// Unix epoch, so a clock glitch can't crash verification.
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

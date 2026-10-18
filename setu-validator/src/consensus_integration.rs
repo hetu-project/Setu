@@ -123,8 +123,11 @@ impl ConsensusValidator {
         
         // Initialize validator set
         let mut validator_set = ValidatorSet::new();
+        // Local record: the node's own identity has no remote peer to
+        // attest it, so it enters through the explicit trusted path.
+        // `add_validator` now fails closed for unsigned membership.
         let validator_info = ValidatorInfo::new(config.node_info.clone(), config.is_leader);
-        validator_set.add_validator(validator_info);
+        validator_set.add_trusted_validator(validator_info);
         
         // CRITICAL: Create shared EventStore FIRST
         // This same instance is used by both ConsensusValidator and ConsensusEngine.dag_manager
@@ -186,8 +189,11 @@ impl ConsensusValidator {
         let (finalization_tx, _) = broadcast::channel(100);
         
         let mut validator_set = ValidatorSet::new();
+        // Local record: the node's own identity has no remote peer to
+        // attest it, so it enters through the explicit trusted path.
+        // `add_validator` now fails closed for unsigned membership.
         let validator_info = ValidatorInfo::new(config.node_info.clone(), config.is_leader);
-        validator_set.add_validator(validator_info);
+        validator_set.add_trusted_validator(validator_info);
         
         // CRITICAL: Create shared EventStore FIRST
         // This same instance is used by both ConsensusValidator and ConsensusEngine.dag_manager
@@ -255,8 +261,11 @@ impl ConsensusValidator {
         let (finalization_tx, _) = broadcast::channel(100);
         
         let mut validator_set = ValidatorSet::new();
+        // Local record: the node's own identity has no remote peer to
+        // attest it, so it enters through the explicit trusted path.
+        // `add_validator` now fails closed for unsigned membership.
         let validator_info = ValidatorInfo::new(config.node_info.clone(), config.is_leader);
-        validator_set.add_validator(validator_info);
+        validator_set.add_trusted_validator(validator_info);
         
         let cf_store: Arc<dyn CFStoreBackend> = Arc::new(CFStore::new());
         let anchor_store: Arc<dyn AnchorStoreBackend> = Arc::new(AnchorStore::new());
@@ -337,8 +346,11 @@ impl ConsensusValidator {
         let (finalization_tx, _) = broadcast::channel(100);
         
         let mut validator_set = ValidatorSet::new();
+        // Local record: the node's own identity has no remote peer to
+        // attest it, so it enters through the explicit trusted path.
+        // `add_validator` now fails closed for unsigned membership.
         let validator_info = ValidatorInfo::new(config.node_info.clone(), config.is_leader);
-        validator_set.add_validator(validator_info);
+        validator_set.add_trusted_validator(validator_info);
         
         // Create consensus engine with the provided EventStore backend and shared state manager
         let engine = Arc::new(ConsensusEngine::with_stores(
@@ -472,12 +484,27 @@ impl ConsensusValidator {
     ///
     /// Updates both the local ValidatorSet copy and the engine's copy,
     /// plus ConsensusManager.validator_count for quorum calculation.
-    pub async fn add_peer_validator(&self, node_info: setu_types::NodeInfo) {
-        let info = ValidatorInfo::new(node_info, false);
+    /// Admit an authenticated peer validator.
+    ///
+    /// `info` MUST carry the peer's Ed25519 public key and its signature
+    /// over the node ID (verified by the registration handler); admission
+    /// fails closed otherwise. Returns whether the peer was accepted.
+    pub async fn add_peer_validator(&self, info: ValidatorInfo) -> bool {
         // 1. Update local ValidatorSet (ConsensusValidator's own copy)
-        self.validator_set.write().await.add_validator(info.clone());
+        let accepted = self.validator_set.write().await.add_validator(info.clone());
         // 2+3. Update engine's ValidatorSet + ConsensusManager.validator_count
-        self.engine.add_consensus_validator(info).await;
+        let engine_accepted = self.engine.add_consensus_validator(info).await;
+        accepted && engine_accepted
+    }
+
+    /// Admit a statically configured (genesis / operator config) peer.
+    ///
+    /// Trusted path: no remote registration exists for config peers, so no
+    /// signature can be verified. Never use for network-supplied data.
+    pub async fn add_trusted_peer_validator(&self, node_info: setu_types::NodeInfo) {
+        let info = ValidatorInfo::new(node_info, false);
+        self.validator_set.write().await.add_trusted_validator(info.clone());
+        self.engine.add_trusted_consensus_validator(info).await;
     }
     
     /// Recover state from persistent storage after restart
@@ -1524,7 +1551,9 @@ mod tests {
                 "127.0.0.1".to_string(),
                 8080,
             );
-            vs.add_validator(ValidatorInfo::new(node, false));
+            // Test fixture: local/static records enter through the trusted
+            // path (unsigned membership is rejected by `add_validator`).
+            vs.add_trusted_validator(ValidatorInfo::new(node, false));
         }
         vs
     }

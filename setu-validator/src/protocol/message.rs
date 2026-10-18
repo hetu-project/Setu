@@ -258,6 +258,7 @@ mod tests {
             "validator-1".to_string(),
         );
         event.payload = EventPayload::Governance(payload);
+        event.recompute_id(); // Seal content-bound ID before submission (verify_id gate)
 
         let msg = SetuMessage::EventBroadcast {
             event: event.clone(),
@@ -416,6 +417,7 @@ mod tests {
             "validator-1".to_string(),
         );
         event.payload = EventPayload::Governance(payload);
+        event.recompute_id(); // Seal content-bound ID before submission (verify_id gate)
 
         // Add execution_result with StateChange where target_subnet = None
         // This triggers #[serde(skip_serializing_if = "Option::is_none")] on target_subnet

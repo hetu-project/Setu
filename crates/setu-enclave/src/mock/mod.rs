@@ -635,7 +635,7 @@ impl MockEnclave {
         &self,
         input: &StfInput,
         _local_runtime: Option<RuntimeExecutor<InMemoryStateStore>>,
-    ) -> StfResult<(StateDiff, Vec<EventId>, Vec<FailedEvent>)> {
+    ) -> StfResult<(StateDiff, Vec<EventId>, Vec<FailedEvent>, [u8; 32])> {
         let start = std::time::Instant::now();
         let mut diff = StateDiff::new();
         let mut processed = Vec::new();
@@ -675,10 +675,18 @@ impl MockEnclave {
             }
         }
 
+        // Compute the post-state root while the execution write guard is
+        // still held. Releasing it first lets a concurrent legacy
+        // `execute_stf` mutate `self.runtime` in between, returning this
+        // call's diff paired with the OTHER call's state root.
+        let raw_data = Self::state_store_root_data(runtime_guard.state())?;
+        let post_state_root = Self::compute_state_root(&raw_data, &diff);
+        drop(runtime_guard);
+
         // Increment execution counter
         *self.execution_count.write().await += 1;
 
-        Ok((diff, processed, failed))
+        Ok((diff, processed, failed, post_state_root))
     }
 
     /// Execute events with an isolated local runtime (solver-tee3 mode)
@@ -689,7 +697,7 @@ impl MockEnclave {
         &self,
         input: &StfInput,
         mut local_runtime: RuntimeExecutor<InMemoryObjectStore>,
-    ) -> StfResult<(StateDiff, Vec<EventId>, Vec<FailedEvent>)> {
+    ) -> StfResult<(StateDiff, Vec<EventId>, Vec<FailedEvent>, RuntimeExecutor<InMemoryObjectStore>)> {
         let start = std::time::Instant::now();
         let mut diff = StateDiff::new();
         let mut processed = Vec::new();
@@ -796,7 +804,7 @@ impl MockEnclave {
         // Increment execution counter
         *self.execution_count.write().await += 1;
 
-        Ok((diff, processed, failed))
+        Ok((diff, processed, failed, local_runtime))
     }
 
     /// Execute a single event using the provided runtime
@@ -1697,22 +1705,94 @@ impl MockEnclave {
         since = "0.3.0",
         note = "Mock state root uses simple hash, not SMT. Replace with real SMT for accurate testing."
     )]
-    fn compute_state_root(state: &HashMap<String, Vec<u8>>) -> [u8; 32] {
+    /// Attested post-state root.
+    ///
+    /// Covers the executed store AND every change reported in `diff`:
+    /// isolated-path Power/Flux writes (and any other diff-only mutation)
+    /// never land in the runtime store, so hashing the store alone attested
+    /// a state different from the diff returned to the caller.
+    fn compute_state_root(state: &HashMap<String, Vec<u8>>, diff: &StateDiff) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"SETU_MOCK_STATE:");
 
-        // Sort keys for determinism
+        // Sort keys for determinism; length-prefix every field so
+        // (key, value) boundaries are unambiguous.
         let mut keys: Vec<_> = state.keys().collect();
         keys.sort();
 
         for key in keys {
             if let Some(value) = state.get(key) {
+                hasher.update(&(key.len() as u64).to_le_bytes());
                 hasher.update(key.as_bytes());
+                hasher.update(&(value.len() as u64).to_le_bytes());
                 hasher.update(value);
             }
         }
 
+        // Writes preserve execution order (last-write-wins is meaningful).
+        hasher.update(b"|DIFF_WRITES:");
+        hasher.update(&(diff.writes.len() as u64).to_le_bytes());
+        for w in &diff.writes {
+            hasher.update(&(w.key.len() as u64).to_le_bytes());
+            hasher.update(w.key.as_bytes());
+            hasher.update(&(w.new_value.len() as u64).to_le_bytes());
+            hasher.update(&w.new_value);
+        }
+
+        // Deletes sorted for determinism (set semantics).
+        let mut deletes: Vec<&String> = diff.deletes.iter().collect();
+        deletes.sort();
+        hasher.update(b"|DIFF_DELETES:");
+        hasher.update(&(deletes.len() as u64).to_le_bytes());
+        for d in deletes {
+            hasher.update(&(d.len() as u64).to_le_bytes());
+            hasher.update(d.as_bytes());
+        }
+
         *hasher.finalize().as_bytes()
+    }
+
+    /// Flatten an isolated-path `InMemoryObjectStore` into root preimage entries.
+    ///
+    /// Covers ALL three maps: `raw` (module/linkage bytes), `envelopes`
+    /// (Move objects), and `raw_objects` (type-agnostic bytes). Hashing only
+    /// `raw()` left coin/object writes out of the attested root, so distinct
+    /// post-execution states attested the same root.
+    fn object_store_root_data(
+        store: &InMemoryObjectStore,
+    ) -> Result<HashMap<String, Vec<u8>>, StfError> {
+        let mut data: HashMap<String, Vec<u8>> = HashMap::new();
+        for (k, v) in store.raw().iter() {
+            data.insert(format!("raw:{k}"), v.clone());
+        }
+        for (id, env) in store.envelopes().iter() {
+            let bytes = bcs::to_bytes(env).map_err(|e| {
+                StfError::StateRootComputationFailed(format!("envelope BCS failed: {e}"))
+            })?;
+            data.insert(format!("env:{id:?}"), bytes);
+        }
+        for (id, bytes) in store.raw_objects().iter() {
+            data.insert(format!("robj:{id:?}"), bytes.clone());
+        }
+        Ok(data)
+    }
+
+    /// Flatten a legacy-path `InMemoryStateStore` into root preimage entries.
+    ///
+    /// Covers BOTH `raw_objects` and `objects` (coins). Coins live in
+    /// `objects`, so a root over raw bytes alone never changed on
+    /// transfer/merge/split.
+    fn state_store_root_data(
+        store: &InMemoryStateStore,
+    ) -> Result<HashMap<String, Vec<u8>>, StfError> {
+        let mut data: HashMap<String, Vec<u8>> = HashMap::new();
+        for (id, bytes) in store.raw_objects().iter() {
+            data.insert(format!("robj:{id:?}"), bytes.clone());
+        }
+        for (id, coin) in store.objects().iter() {
+            data.insert(format!("obj:{id:?}"), coin.to_coin_state_bytes());
+        }
+        Ok(data)
     }
 
     /// Compute hash of output for attestation user_data
@@ -1765,7 +1845,7 @@ impl EnclaveRuntime for MockEnclave {
             .any(|e| matches!(e.payload, setu_types::event::EventPayload::MovePtb(_)));
         let use_read_set_state = use_read_set_state || has_move_ptb;
 
-        let (diff, events_processed, events_failed) = if use_read_set_state {
+        let (diff, events_processed, events_failed, post_state_root) = if use_read_set_state {
             // Build temporary state from read_set into a LOCAL ObjectStore
             let local_store =
                 self.build_object_store_from_read_set(&input.read_set, &input.module_read_set)?;
@@ -1778,19 +1858,24 @@ impl EnclaveRuntime for MockEnclave {
             );
 
             // Execute using the ISOLATED local runtime (not self.runtime!)
-            self.simulate_execution_isolated(&input, local_runtime)
-                .await?
+            let (diff, events_processed, events_failed, runtime) =
+                self.simulate_execution_isolated(&input, local_runtime)
+                    .await?;
+            let raw_data = Self::object_store_root_data(runtime.state())?;
+            let post_state_root = Self::compute_state_root(&raw_data, &diff);
+            (diff, events_processed, events_failed, post_state_root)
         } else {
-            // Legacy mode: use shared self.runtime (only for backward compatibility)
-            self.simulate_execution(&input, None).await?
-        };
-
-        // Compute post-state root from legacy state
-        // Note: For full object model, should compute from RuntimeExecutor state
-        #[allow(deprecated)]
-        let post_state_root = {
-            let state = self.legacy_state.read().await;
-            Self::compute_state_root(&state)
+            // Legacy mode: use shared self.runtime (only for backward compatibility).
+            // Keep the execution results: diff drives gas_used/stats below and
+            // the state_diff surfaced in StfOutput; dropping them (as an
+            // earlier revision did) reports empty writes/events for every
+            // legacy execution.
+            let (diff, events_processed, events_failed, post_state_root) =
+                self.simulate_execution(&input, None).await?;
+            // NOTE: the root is computed inside `simulate_execution` while
+            // its execution write guard is held — do NOT re-read
+            // `self.runtime` here.
+            (diff, events_processed, events_failed, post_state_root)
         };
 
         // Compute input hash for attestation binding
@@ -1954,6 +2039,29 @@ mod tests {
             setu_move_vm::move_core_types::account_address::AccountAddress::new(addr),
             setu_move_vm::move_core_types::identifier::Identifier::new(name).unwrap(),
         )
+    }
+
+    /// Two executions with identical runtime stores but different
+    /// diff-only writes (Power/Flux) must attest different roots: the root
+    /// has to cover everything the returned diff reports.
+    #[test]
+    fn test_post_state_root_binds_diff_only_writes() {
+        use crate::stf::WriteSetEntry;
+
+        let mut store = HashMap::new();
+        store.insert("robj:a".to_string(), vec![1u8, 2, 3]);
+
+        let mut diff_a = StateDiff::new();
+        diff_a.add_write(WriteSetEntry::new("power:alice".to_string(), vec![9]));
+        let mut diff_b = StateDiff::new();
+        diff_b.add_write(WriteSetEntry::new("power:alice".to_string(), vec![8]));
+
+        let root_a = MockEnclave::compute_state_root(&store, &diff_a);
+        let root_b = MockEnclave::compute_state_root(&store, &diff_b);
+        assert_ne!(
+            root_a, root_b,
+            "diff-only writes must be committed to the attested root"
+        );
     }
 
     fn create_test_event(id: &str) -> Event {

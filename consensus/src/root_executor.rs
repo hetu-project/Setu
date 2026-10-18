@@ -401,7 +401,7 @@ mod tests {
             VLCSnapshot::default(),
             creator.to_string(),
         );
-        event.subnet_id = Some(SubnetId::ROOT);
+        event = event.with_subnet(SubnetId::ROOT);
         event
     }
 
@@ -412,7 +412,7 @@ mod tests {
             VLCSnapshot::default(),
             creator.to_string(),
         );
-        event.subnet_id = Some(SubnetId::ROOT);
+        event = event.with_subnet(SubnetId::ROOT);
         event
     }
 

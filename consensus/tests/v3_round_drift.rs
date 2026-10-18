@@ -15,17 +15,23 @@
 //   - cf.round == local_round on the happy path → Accepted
 
 use consensus::{CfReceiveOutcome, ConsensusEngine, ValidatorSet};
+use ed25519_dalek::{Signer, SigningKey};
+use rand_core::OsRng;
 use setu_types::{Anchor, ConsensusConfig, ConsensusFrame, NodeInfo, VLCSnapshot, ValidatorInfo};
 
 fn make_validator_set() -> ValidatorSet {
     let mut set = ValidatorSet::new();
     for i in 1..=3 {
-        let node = NodeInfo::new_validator(
-            format!("v{}", i),
+        let id = format!("v{}", i);
+        let mut node = NodeInfo::new_validator(
+            id.clone(),
             "127.0.0.1".to_string(),
             9000 + i as u16,
         );
-        set.add_validator(ValidatorInfo::new(node, false));
+        let signing_key = SigningKey::generate(&mut OsRng);
+        node.public_key = signing_key.verifying_key().to_bytes().to_vec();
+        let signature = signing_key.sign(id.as_bytes()).to_bytes().to_vec();
+        set.add_validator(ValidatorInfo::new(node, false).with_signature(signature));
     }
     set
 }

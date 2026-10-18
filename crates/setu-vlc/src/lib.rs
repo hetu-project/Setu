@@ -126,6 +126,21 @@ impl VectorClock {
     pub fn nodes(&self) -> Vec<&String> {
         self.clocks.keys().collect()
     }
+
+    /// Sorted (node_id, time) entries for deterministic hashing.
+    ///
+    /// HashMap iteration order is nondeterministic across runs, so any
+    /// digest over a vector clock MUST use this (or equivalent sorting)
+    /// instead of iterating `clocks` directly.
+    pub fn sorted_entries(&self) -> Vec<(&str, u64)> {
+        let mut entries: Vec<(&str, u64)> = self
+            .clocks
+            .iter()
+            .map(|(k, &t)| (k.as_str(), t))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries
+    }
     
     /// Get the size of the clock (number of nodes)
     pub fn len(&self) -> usize {
@@ -258,15 +273,31 @@ impl VLCSnapshot {
     /// This is the core operation of hybrid logical clock:
     /// - Merge vector clocks
     /// - logical_time = max(local_logical_time, received_logical_time) + 1
+    /// - Set local node's vector clock entry to the new logical_time
+    ///   (NOT increment, to avoid double-increment when tick() is
+    ///   called after merge() in the consensus engine)
     pub fn receive(&mut self, other: &VLCSnapshot, local_node_id: &str) {
         // Merge vector clocks
         self.vector_clock.merge(&other.vector_clock);
         
-        // Update logical time
-        self.logical_time = self.logical_time.max(other.logical_time) + 1;
-        
-        // Increment local node's vector clock
-        self.vector_clock.increment(local_node_id);
+        // Update logical time. The merged local vector-clock entry is part
+        // of the causal history too: `new_with_clock()` accepts a clock
+        // with a large local entry while starting `logical_time` at zero,
+        // so taking only `max(logical_time, other)` would OBSERVE a lower
+        // value and then overwrite the local entry with it below. That
+        // loses causal history and can make a later snapshot compare as
+        // happening-before one the node already emitted.
+        let merged_local = self.vector_clock.get(local_node_id);
+        self.logical_time = self
+            .logical_time
+            .max(other.logical_time)
+            .max(merged_local)
+            .saturating_add(1);
+
+        // Set local node's vector clock entry to the new logical_time.
+        // Using set() instead of increment() to avoid double-increment
+        // when tick() is called after merge() in the consensus engine.
+        self.vector_clock.set(local_node_id, self.logical_time);
         
         // Update physical time
         self.physical_time = Self::current_physical_time();
@@ -288,8 +319,12 @@ impl VLCSnapshot {
     }
     
     /// Check if two snapshots are concurrent
+    ///
+    /// Uses happens_before which considers both vector_clock and
+    /// logical_time. Causally-equal clocks (same vector_clock but
+    /// different logical_time) are correctly NOT concurrent.
     pub fn is_concurrent(&self, other: &VLCSnapshot) -> bool {
-        self.vector_clock.is_concurrent(&other.vector_clock)
+        !self.happens_before(other) && !other.happens_before(self) && self != other
     }
     
     /// Garbage collection: remove inactive nodes
@@ -317,5 +352,32 @@ impl VLCSnapshot {
 impl Default for VLCSnapshot {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `new_with_clock()` seeds a large local entry while
+    /// `logical_time` starts at 0. Receiving an empty snapshot must not
+    /// observe a LOWER local component (that erases causal history and can
+    /// make a later snapshot compare as preceding one already emitted).
+    #[test]
+    fn receive_never_decreases_local_entry() {
+        let mut vc = VectorClock::new();
+        vc.set("node-a", 100);
+        let mut snapshot = VLCSnapshot::new_with_clock(vc);
+        assert_eq!(snapshot.logical_time, 0);
+
+        let empty = VLCSnapshot::new();
+        snapshot.receive(&empty, "node-a");
+
+        assert!(
+            snapshot.vector_clock.get("node-a") >= 100,
+            "local entry regressed to {}",
+            snapshot.vector_clock.get("node-a")
+        );
+        assert!(snapshot.logical_time > 100);
     }
 }

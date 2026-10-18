@@ -99,6 +99,15 @@ pub struct RegisterValidatorRequest {
     pub stake_amount: u64,
     /// Commission rate (0-100)
     pub commission_rate: u8,
+    /// Ed25519 consensus public key (32 bytes). Distinct from the
+    /// secp256k1 ownership key in `public_key`; this is the key the
+    /// validator signs votes with. Bound into the registration signature.
+    #[serde(default)]
+    pub consensus_public_key: Vec<u8>,
+    /// Ed25519 signature over `validator_id` made with the consensus key.
+    /// Admission rejects an empty/invalid one (fail closed).
+    #[serde(default)]
+    pub consensus_signature: Vec<u8>,
 }
 
 /// Response to validator registration

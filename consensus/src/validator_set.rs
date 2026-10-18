@@ -7,6 +7,7 @@
 //! It integrates with the liveness module for leader election.
 
 use setu_types::ValidatorInfo;
+use tracing::warn;
 #[cfg(test)]
 use setu_types::NodeInfo;
 use std::collections::HashMap;
@@ -81,19 +82,54 @@ impl ValidatorSet {
     }
 
     /// Add a validator to the set.
-    pub fn add_validator(&mut self, mut info: ValidatorInfo) {
+    ///
+    /// Rejects unauthenticated validator membership changes (#45).
+    /// The validator's signature over its node ID must be verified
+    /// before adding to prevent unauthorized membership changes.
+    /// Returns `true` if the validator was added, `false` if verification
+    /// failed (a warning is logged). Callers MUST check the return value:
+    /// a rejected insert must not be reported as success.
+    pub fn add_validator(&mut self, info: ValidatorInfo) -> bool {
+        // Verify the validator's signature (audit #45 / unauthenticated
+        // membership). `verify()` fails closed, so an empty signature is
+        // rejected here rather than silently treated as trusted.
+        if let Err(e) = info.verify() {
+            warn!(
+                validator_id = %info.node.id,
+                "Rejecting unauthenticated validator membership change: {}", e
+            );
+            return false;
+        }
+
+        self.insert_validator(info);
+        true
+    }
+
+    /// Add a validator WITHOUT signature verification.
+    ///
+    /// Reserved for trusted sources only: genesis configuration and the
+    /// node's own local record (which has no remote peer to attest it yet).
+    /// Never call this with network-supplied data — untrusted membership
+    /// updates must go through `add_validator`, which fails closed.
+    pub fn add_trusted_validator(&mut self, info: ValidatorInfo) -> bool {
+        self.insert_validator(info);
+        true
+    }
+
+    fn insert_validator(&mut self, mut info: ValidatorInfo) -> bool {
         let is_first = self.validators.is_empty();
-        
+
         // First validator becomes the initial leader
         if is_first {
             info.is_leader = true;
             self.leader_id = Some(info.node.id.clone());
         }
-        
+
         self.validators.insert(info.node.id.clone(), info);
-        
+
         // Rebuild election when validators change
         self.rebuild_election();
+        true
     }
 
     /// Remove a validator from the set.
@@ -324,16 +360,28 @@ impl Default for ValidatorSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand_core::OsRng;
 
     fn create_validator(id: &str) -> ValidatorInfo {
-        let node = NodeInfo::new_validator(id.to_string(), "127.0.0.1".to_string(), 8000);
-        ValidatorInfo::new(node, false)
+        let mut node = NodeInfo::new_validator(id.to_string(), "127.0.0.1".to_string(), 8000);
+        node.public_key = Vec::new(); // will be set below
+        // Generate a signing key and derive the public key
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
+        node.public_key = public_key_bytes.clone();
+        let signature = signing_key.sign(id.as_bytes()).to_bytes().to_vec();
+        ValidatorInfo::new(node, false).with_signature(signature)
     }
 
     fn create_validator_with_stake(id: &str, stake: u64) -> ValidatorInfo {
         let mut node = NodeInfo::new_validator(id.to_string(), "127.0.0.1".to_string(), 8000);
         node.stake = stake;
-        ValidatorInfo::new(node, false)
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
+        node.public_key = public_key_bytes.clone();
+        let signature = signing_key.sign(id.as_bytes()).to_bytes().to_vec();
+        ValidatorInfo::new(node, false).with_signature(signature)
     }
 
     #[test]

@@ -41,7 +41,15 @@ impl Anchor {
             .unwrap()
             .as_millis() as u64;
 
-        let id = Self::compute_id(&event_ids, &vlc_snapshot, &state_root, timestamp);
+        let id = Self::compute_id(
+            &event_ids,
+            &vlc_snapshot,
+            &state_root,
+            &None,
+            &previous_anchor,
+            depth,
+            timestamp,
+        );
 
         Self {
             id,
@@ -70,7 +78,15 @@ impl Anchor {
 
         // Use global_state_root as the legacy state_root
         let state_root = hex::encode(&merkle_roots.global_state_root);
-        let id = Self::compute_id(&event_ids, &vlc_snapshot, &state_root, timestamp);
+        let id = Self::compute_id(
+            &event_ids,
+            &vlc_snapshot,
+            &state_root,
+            &Some(&merkle_roots),
+            &previous_anchor,
+            depth,
+            timestamp,
+        );
 
         Self {
             id,
@@ -84,19 +100,58 @@ impl Anchor {
         }
     }
 
+    /// Anchor ID binds the full anchor content: ordered event IDs (commit
+    /// order is semantically meaningful, unlike DAG parent sets), full VLC
+    /// snapshot, state root + Merkle-roots digest, chain linkage
+    /// (`previous_anchor`, `depth`), and timestamp.
+    ///
+    /// Previously only (event IDs, VLC logical time, state root, timestamp)
+    /// were hashed: splicing `previous_anchor`/`depth` or swapping Merkle
+    /// roots went undetected by anyone comparing anchor IDs.
     fn compute_id(
         event_ids: &[EventId],
         vlc_snapshot: &VLCSnapshot,
         state_root: &str,
+        merkle_roots: &Option<&AnchorMerkleRoots>,
+        previous_anchor: &Option<AnchorId>,
+        depth: u64,
         timestamp: u64,
     ) -> AnchorId {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"SETU_ANCHOR_ID:");
+        hasher.update(b"SETU_ANCHOR_ID_V2:");
+        // Length-prefix every variable-length field: bare concatenation
+        // allows distinct contents to share a preimage (VLC entries run
+        // directly into the state root without a boundary).
+        hasher.update(&(event_ids.len() as u64).to_le_bytes());
         for event_id in event_ids {
-            hasher.update(event_id.as_bytes());
+            Self::feed_bytes(&mut hasher, event_id.as_bytes());
         }
         hasher.update(&vlc_snapshot.logical_time.to_le_bytes());
-        hasher.update(state_root.as_bytes());
+        hasher.update(&vlc_snapshot.physical_time.to_le_bytes());
+        let vlc_entries = vlc_snapshot.vector_clock.sorted_entries();
+        hasher.update(&(vlc_entries.len() as u64).to_le_bytes());
+        for (node_id, time) in vlc_entries {
+            Self::feed_bytes(&mut hasher, node_id.as_bytes());
+            hasher.update(&time.to_le_bytes());
+        }
+        Self::feed_bytes(&mut hasher, state_root.as_bytes());
+        if let Some(roots) = merkle_roots {
+            // digest() already sorts subnet roots for determinism.
+            hasher.update(&[1u8]);
+            hasher.update(&roots.digest());
+        } else {
+            hasher.update(&[0u8]);
+        }
+        match previous_anchor {
+            Some(prev) => {
+                hasher.update(&[1u8]);
+                Self::feed_bytes(&mut hasher, prev.as_bytes());
+            }
+            None => {
+                hasher.update(&[0u8]);
+            }
+        }
+        hasher.update(&depth.to_le_bytes());
         hasher.update(&timestamp.to_le_bytes());
         hex::encode(hasher.finalize().as_bytes())
     }
@@ -134,6 +189,31 @@ impl Anchor {
     
     /// Compute a hash of this anchor for anchor chain tree
     /// 
+    /// Length-prefix a byte string before hashing (unambiguous framing).
+    fn feed_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+
+    /// Recompute the anchor ID from the received fields and compare.
+    ///
+    /// A frame carries the anchor ID as an opaque string; without this
+    /// check a peer could keep a valid CF ID while rewriting
+    /// `event_ids`, `state_root`, `merkle_roots`, `previous_anchor`,
+    /// `depth`, or the VLC snapshot (CF IDs only bind `anchor.id`).
+    pub fn verify_id(&self) -> bool {
+        let expected = Self::compute_id(
+            &self.event_ids,
+            &self.vlc_snapshot,
+            &self.state_root,
+            &self.merkle_roots.as_ref(),
+            &self.previous_anchor,
+            self.depth,
+            self.timestamp,
+        );
+        self.id == expected
+    }
+
     /// This hash includes all critical fields:
     /// - id, depth, previous_anchor (chain structure)
     /// - events_root, global_state_root, anchor_chain_root (Merkle commitments)
@@ -313,8 +393,8 @@ impl ConsensusFrame {
         // V2 domain separator: includes round to bind proposer<->round (PR-4).
         hasher.update(b"SETU_CF_ID_V2:");
         hasher.update(&round.to_le_bytes());
-        hasher.update(anchor.id.as_bytes());
-        hasher.update(proposer.as_bytes());
+        Anchor::feed_bytes(&mut hasher, anchor.id.as_bytes());
+        Anchor::feed_bytes(&mut hasher, proposer.as_bytes());
         hasher.update(&timestamp.to_le_bytes());
         hex::encode(hasher.finalize().as_bytes())
     }
@@ -375,6 +455,13 @@ impl ConsensusFrame {
     /// 
     /// This prevents malicious nodes from constructing CFs with mismatched IDs.
     pub fn verify_id(&self) -> bool {
+        // The CF ID binds only `anchor.id` as an opaque string, so the
+        // embedded anchor's own commitment MUST be recomputed from its
+        // fields; otherwise anchor metadata can be swapped while the CF
+        // remains "valid".
+        if !self.anchor.verify_id() {
+            return false;
+        }
         let expected_id = Self::compute_id(self.round, &self.anchor, &self.proposer, self.created_at);
         self.id == expected_id
     }
@@ -499,5 +586,50 @@ mod tests {
         let v1_id = hex::encode(h.finalize().as_bytes());
 
         assert_ne!(v1_id, v2_id, "V1 and V2 domains must produce distinct ids");
+    }
+
+    #[test]
+    fn anchor_id_unambiguous_field_boundaries() {
+        // Without length prefixes these two VLC layouts concatenate to the
+        // same bytes: entry ("a", b"bbbbbbbb") then state root "c" vs. an
+        // empty clock then state root "abbbbbbbbc".
+        let mut vc_a = VectorClock::new();
+        vc_a.set("a", u64::from_le_bytes(*b"bbbbbbbb"));
+        let snap_a = VLCSnapshot {
+            vector_clock: vc_a,
+            logical_time: 0,
+            physical_time: 0,
+        };
+        let snap_b = VLCSnapshot {
+            vector_clock: VectorClock::new(),
+            logical_time: 0,
+            physical_time: 0,
+        };
+
+        let ts = 42u64;
+        let id_a = Anchor::compute_id(&[], &snap_a, "c", &None, &None, 0, ts);
+        let id_b = Anchor::compute_id(&[], &snap_b, "abbbbbbbbc", &None, &None, 0, ts);
+        assert_ne!(id_a, id_b, "equal-preimage inputs must hash differently");
+    }
+
+    #[test]
+    fn anchor_verify_id_detects_field_tamper() {
+        let anchor = Anchor::new(
+            vec!["e1".to_string()],
+            create_vlc_snapshot(),
+            "state_root".to_string(),
+            None,
+            0,
+        );
+        assert!(anchor.verify_id(), "fresh anchor must self-verify");
+
+        // Frame keeps the original CF ID: only the embedded anchor changes.
+        let mut cf = ConsensusFrame::new(0, anchor, "v1".to_string());
+        assert!(cf.verify_id());
+        cf.anchor.depth = 99;
+        assert!(
+            !cf.verify_id(),
+            "swapping anchor metadata under a valid CF id must be rejected"
+        );
     }
 }
