@@ -159,8 +159,71 @@ impl ValidatorConfig {
     }
 }
 
+/// Read the `--env-file <path>` argument (default: `.env` in the current
+/// directory). Fails loudly when the flag is given without a path.
+fn env_file_arg() -> anyhow::Result<Option<String>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(idx) = args.iter().position(|a| a == "--env-file") else {
+        return Ok(None);
+    };
+    match args.get(idx + 1) {
+        Some(path) if !path.starts_with("--") => Ok(Some(path.clone())),
+        _ => anyhow::bail!("--env-file requires a path"),
+    }
+}
+
+/// Load `KEY=VALUE` pairs from a dotenv file.
+///
+/// A missing file is not an error (the default `.env` is optional). Existing
+/// process environment variables win, so the shell can override any value.
+/// Blank lines and `#` comments are ignored; an optional `export ` prefix and
+/// matching surrounding quotes are stripped.
+fn load_env_file(path: &std::path::Path) -> anyhow::Result<()> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("reading env file {}", path.display())))
+        }
+    };
+    for (lineno, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, value)) = line.split_once('=') else {
+            warn!(
+                file = %path.display(),
+                line = lineno + 1,
+                "ignoring malformed .env line"
+            );
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, value);
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Environment first: dotenv values feed ValidatorConfig::from_env below.
+    let env_file = env_file_arg()?.unwrap_or_else(|| ".env".to_string());
+    load_env_file(std::path::Path::new(&env_file))?;
+
     // Initialize tracing with more detailed output
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
@@ -1319,4 +1382,48 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Validator shutdown complete");
     Ok(())
+}
+#[cfg(test)]
+mod dotenv_tests {
+    use super::load_env_file;
+    use std::io::Write;
+
+    fn write_tmp(contents: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(contents.as_bytes()).expect("write temp file");
+        f
+    }
+
+    #[test]
+    fn parses_comments_quotes_and_export_prefix() {
+        let f = write_tmp(
+            "# comment\n\
+             DOTENV_TEST_A=9090\n\
+             export DOTENV_TEST_B=9091\n\
+             DOTENV_TEST_C=\"/tmp/setu db\"\n\
+             \n",
+        );
+        // Process env wins over the file.
+        std::env::set_var("DOTENV_TEST_A", "8080");
+        load_env_file(f.path()).expect("load");
+        assert_eq!(std::env::var("DOTENV_TEST_A").unwrap(), "8080");
+        assert_eq!(std::env::var("DOTENV_TEST_B").unwrap(), "9091");
+        assert_eq!(std::env::var("DOTENV_TEST_C").unwrap(), "/tmp/setu db");
+        std::env::remove_var("DOTENV_TEST_A");
+        std::env::remove_var("DOTENV_TEST_B");
+        std::env::remove_var("DOTENV_TEST_C");
+    }
+
+    #[test]
+    fn missing_file_is_not_an_error() {
+        load_env_file(std::path::Path::new("/nonexistent/definitely/missing.env")).expect("missing ok");
+    }
+
+    #[test]
+    fn malformed_lines_are_ignored() {
+        let f = write_tmp("NO_EQUALS_SIGN\nDOTENV_TEST_D=9092\n");
+        load_env_file(f.path()).expect("load");
+        assert_eq!(std::env::var("DOTENV_TEST_D").unwrap(), "9092");
+        std::env::remove_var("DOTENV_TEST_D");
+    }
 }
