@@ -562,6 +562,34 @@ Setu/
 ## ⚙️ Configuration
 
 <details>
+<summary><b>📄 Dotenv files (optional)</b></summary>
+
+<br>
+
+`setu-validator` loads a `.env` file from its working directory on startup, so you
+can keep node configuration out of your shell history and scripts:
+
+```bash
+# .env
+VALIDATOR_ID=validator-1
+VALIDATOR_HTTP_PORT=8080
+VALIDATOR_P2P_PORT=9000
+VALIDATOR_DB_PATH=/tmp/setu/validator
+```
+
+```bash
+./target/release/setu-validator          # loads ./.env if present
+./target/release/setu-validator --env-file /etc/setu/validator.env
+```
+
+Rules: `KEY=VALUE` lines, `#` comments, optional `export ` prefix and quotes are
+supported. Values already present in the process environment take precedence, so
+`VALIDATOR_HTTP_PORT=9090 ./target/release/setu-validator` still wins. A missing
+file is not an error. See `.env.example` for the full list.
+
+</details>
+
+<details>
 <summary><b>🟢 Validator environment variables</b></summary>
 
 <br>
