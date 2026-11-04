@@ -35,7 +35,8 @@ setu-framework/build/
 
 # Move compile tool build artifacts (independent Cargo project)
 tools/move-compile/target/
-.github/
+.github/*
+!.github/workflows/
 .env/
 .env
 deploy/.env
