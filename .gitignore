@@ -20,7 +20,9 @@ logs/
 docs/guide
 .setu-data/
 profile_bottleneck.sh
-tests/
+tests/*
+!tests/golden/
+!tests/golden/move_upgrade_payload_v1.hex
 *.py
 .VSCodeCounter/
 docs/
