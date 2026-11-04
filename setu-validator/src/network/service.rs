@@ -2294,13 +2294,32 @@ mod tests {
     }
 
     fn sample_solver_request(solver_id: &str) -> setu_rpc::RegisterSolverRequest {
+        use k256::ecdsa::SigningKey;
+        let sk = SigningKey::from_slice(&[42u8; 32]).expect("fixed test key");
+        let pk = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let mut reg = setu_types::SolverRegistration::new(
+            solver_id.to_string(),
+            "127.0.0.1".to_string(),
+            9001,
+            "0xtest".to_string(),
+            pk,
+            vec![],
+        )
+        .with_capacity(100)
+        .with_shard("shard-0")
+        .with_resources(vec!["ETH".to_string()]);
+        reg.sign(&[42u8; 32]).expect("sign test request");
         setu_rpc::RegisterSolverRequest {
             solver_id: solver_id.to_string(),
             address: "127.0.0.1".to_string(),
             port: 9001,
             account_address: "0xtest".to_string(),
-            public_key: vec![],
-            signature: vec![],
+            public_key: reg.public_key,
+            signature: reg.signature,
             capacity: 100,
             shard_id: Some("shard-0".to_string()),
             assigned_shard: None,
@@ -2496,6 +2515,28 @@ mod tests {
 
         assert!(response.success);
         assert_eq!(service.solver_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_solver_rejects_invalid_signature() {
+        let service = create_test_service();
+        let handler = service.registration_handler();
+
+        // Well-formed but wrong signature must be rejected cryptographically.
+        let mut forged = sample_solver_request("solver-forged");
+        forged.signature = vec![0u8; 64];
+        let response = handler.register_solver(forged).await;
+        assert!(!response.success);
+        assert_eq!(response.assigned_id, None);
+        assert!(response.message.contains("Invalid registration signature"));
+        assert_eq!(service.solver_count(), 0);
+
+        // The pre-fix stub accepted any non-empty bytes.
+        let mut empty = sample_solver_request("solver-empty");
+        empty.signature = vec![];
+        let response = handler.register_solver(empty).await;
+        assert!(!response.success);
+        assert_eq!(service.solver_count(), 0);
     }
 
     #[tokio::test]

@@ -93,6 +93,23 @@ impl RegistrationHandler for ValidatorRegistrationHandler {
         .with_shard(request.shard_id.clone().unwrap_or_default())
         .with_resources(request.resources.clone());
 
+        // Auth: the request must prove ownership of the claimed public key.
+        // The previous implementation never verified this (and
+        // `SolverRegistration::verify_signature` was a stub returning true for
+        // any non-empty bytes), so anyone could register an arbitrary solver
+        // identity and receive routed tasks.
+        if !registration.verify_signature() {
+            warn!(
+                solver_id = %request.solver_id,
+                "Rejecting solver registration: invalid ownership signature"
+            );
+            return RegisterSolverResponse {
+                success: false,
+                message: "Invalid registration signature: must prove ownership of the claimed public key".to_string(),
+                assigned_id: None,
+            };
+        }
+
         let mut event = Event::solver_register(
             registration,
             vec![],
