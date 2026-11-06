@@ -111,23 +111,63 @@ impl SolverConfig {
     }
 }
 
-/// Load keypair from file and extract registration info
-fn load_key_info(key_file: &str) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+/// Load keypair from file and produce the secp256k1 registration identity.
+///
+/// The key file holds an Ed25519 keypair; the secp256k1 ownership key is
+/// derived deterministically from its secret with a domain-separated hash, so
+/// the CLI and the solver binary derive the same key from the same file.
+fn load_key_info(
+    key_file: &str,
+    solver_id: &str,
+    address: &str,
+    port: u16,
+    capacity: u32,
+    shard_id: Option<&str>,
+    resources: &[String],
+) -> anyhow::Result<(String, Vec<u8>, Vec<u8>, Vec<u8>)> {
     info!("Loading keypair from: {}", key_file);
-    
+
     let keypair = load_keypair(key_file)?;
     let account_address = keypair.address().to_string();
-    let public_key = keypair.public().as_bytes();
-    
-    // Create registration message to sign
-    let message = format!("Register Solver: {}", account_address);
-    let signature = keypair.sign(message.as_bytes()).as_bytes();
-    
+
+    let mut seed_hasher = blake3::Hasher::new();
+    seed_hasher.update(b"SETU_CLI_SECP_KEY_V1:");
+    seed_hasher.update(keypair.secret_bytes());
+    let seed = seed_hasher.finalize();
+    let secp_signing_key = k256::ecdsa::SigningKey::from_slice(seed.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Failed to derive secp256k1 key: {e}"))?;
+    let public_key = secp_signing_key
+        .verifying_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
+
+    // Sign exactly the registration the validator will rebuild and verify.
+    let mut registration = setu_types::SolverRegistration::new(
+        solver_id.to_string(),
+        address.to_string(),
+        port,
+        account_address.clone(),
+        public_key.clone(),
+        vec![],
+    )
+    .with_capacity(capacity)
+    .with_shard(shard_id.unwrap_or("").to_string())
+    .with_resources(resources.to_vec());
+    {
+        use k256::ecdsa::signature::Signer;
+        let digest = setu_types::hash_utils::setu_hash(&registration.signing_message());
+        let sig: k256::ecdsa::Signature = secp_signing_key.sign(&digest);
+        registration.signature = sig.to_bytes().to_vec();
+    }
+    let signature = registration.signature;
+
     info!("Keypair loaded successfully");
     info!("  Account Address: {}", account_address);
     info!("  Public Key: {}", hex::encode(&public_key));
-    
-    Ok((account_address, public_key, signature))
+
+    let signing_secret = secp_signing_key.to_bytes().to_vec();
+    Ok((account_address, public_key, signature, signing_secret))
 }
 
 #[tokio::main]
@@ -179,14 +219,23 @@ async fn main() -> anyhow::Result<()> {
     info!("└─────────────────────────────────────────────────────────────┘");
 
     // Load key info if key file is provided
-    let (account_address, public_key, signature) = if let Some(ref key_file) = config.key_file {
-        match load_key_info(key_file) {
+    let (account_address, public_key, signature, signing_secret) = if let Some(ref key_file) = config.key_file {
+        match load_key_info(
+            key_file,
+            &config.solver_id,
+            &config.address,
+            config.port,
+            config.capacity,
+            config.shard_id.as_deref(),
+            &config.resources,
+        ) {
             Ok(info) => info,
             Err(e) => {
                 error!("Failed to load key file: {}", e);
                 error!("Using placeholder values for registration");
                 (
                     "0x0000000000000000000000000000000000000000".to_string(),
+                    vec![],
                     vec![],
                     vec![],
                 )
@@ -197,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         warn!("Using placeholder values for registration");
         (
             "0x0000000000000000000000000000000000000000".to_string(),
+            vec![],
             vec![],
             vec![],
         )
@@ -217,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
         account_address: account_address.clone(),
         public_key: public_key.clone(),
         signature: signature.clone(),
+        signing_secret: signing_secret.clone(),
     };
     
     let network_client = Arc::new(SolverNetworkClient::new(network_config));

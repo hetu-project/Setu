@@ -70,6 +70,9 @@ pub struct SolverNetworkConfig {
     pub public_key: Vec<u8>,
     /// Signature for registration
     pub signature: Vec<u8>,
+    /// secp256k1 secret used to sign heartbeats (derived from the key file)
+    #[allow(dead_code)]
+    pub signing_secret: Vec<u8>,
 }
 
 impl Default for SolverNetworkConfig {
@@ -88,6 +91,7 @@ impl Default for SolverNetworkConfig {
             account_address: "0x0000000000000000000000000000000000000000".to_string(),
             public_key: vec![],
             signature: vec![],
+            signing_secret: vec![],
         }
     }
 }
@@ -189,11 +193,21 @@ impl SolverNetworkClient {
             .unwrap()
             .as_secs();
         
-        let request = HeartbeatRequest {
+        let mut request = HeartbeatRequest {
             node_id: self.config.solver_id.clone(),
             current_load: Some(current_load),
             timestamp,
+            signature: Vec::new(),
         };
+        // Sign the heartbeat so the validator can trust the reported load.
+        if self.config.signing_secret.len() == 32 {
+            use k256::ecdsa::{signature::Signer, SigningKey};
+            if let Ok(signing_key) = SigningKey::from_slice(&self.config.signing_secret) {
+                let digest = setu_types::hash_utils::setu_hash(&request.signing_message());
+                let sig: k256::ecdsa::Signature = signing_key.sign(&digest);
+                request.signature = sig.to_bytes().to_vec();
+            }
+        }
         
         let url = format!(
             "http://{}:{}/api/v1/heartbeat",
@@ -409,6 +423,7 @@ mod tests {
             account_address: "0x0000000000000000000000000000000000000000".to_string(),
             public_key: vec![],
             signature: vec![],
+            signing_secret: vec![],
         };
         
         let client = SolverNetworkClient::new(config);

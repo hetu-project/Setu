@@ -48,6 +48,29 @@ fn validate_public_subnet_name(raw: &str) -> Result<String, &'static str> {
     Ok(raw.to_string())
 }
 
+/// Verify a solver heartbeat signature over the registered secp256k1 key.
+///
+/// Heartbeats carry the solver's load, which the validator uses for routing.
+/// Without this check anyone could report an arbitrary load for any solver
+/// (marking competitors unavailable or preferring their own).
+fn verify_heartbeat_signature(request: &HeartbeatRequest, public_key: &[u8]) -> bool {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    if request.signature.len() != 64 || public_key.len() != 65 {
+        return false;
+    }
+    let verifying_key = match VerifyingKey::from_sec1_bytes(public_key) {
+        Ok(key) => key,
+        Err(_) => return false,
+    };
+    let signature = match Signature::from_slice(&request.signature) {
+        Ok(sig) => sig,
+        Err(_) => return false,
+    };
+    let digest = setu_types::hash_utils::setu_hash(&request.signing_message());
+    verifying_key.verify(&digest, &signature).is_ok()
+}
+
 #[async_trait::async_trait]
 impl RegistrationHandler for ValidatorRegistrationHandler {
     async fn register_solver(&self, request: RegisterSolverRequest) -> RegisterSolverResponse {
@@ -92,6 +115,23 @@ impl RegistrationHandler for ValidatorRegistrationHandler {
         .with_capacity(request.capacity)
         .with_shard(request.shard_id.clone().unwrap_or_default())
         .with_resources(request.resources.clone());
+
+        // Auth: the request must prove ownership of the claimed public key.
+        // The previous implementation never verified this (and
+        // `SolverRegistration::verify_signature` was a stub returning true for
+        // any non-empty bytes), so anyone could register an arbitrary solver
+        // identity and receive routed tasks.
+        if !registration.verify_signature() {
+            warn!(
+                solver_id = %request.solver_id,
+                "Rejecting solver registration: invalid ownership signature"
+            );
+            return RegisterSolverResponse {
+                success: false,
+                message: "Invalid registration signature: must prove ownership of the claimed public key".to_string(),
+                assigned_id: None,
+            };
+        }
 
         let mut event = Event::solver_register(
             registration,
@@ -513,6 +553,34 @@ impl RegistrationHandler for ValidatorRegistrationHandler {
             info!(
                 node_id = %request.node_id,
                 "Heartbeat from unknown solver — returning acknowledged=false to trigger re-registration"
+            );
+            return HeartbeatResponse {
+                acknowledged: false,
+                server_timestamp: current_timestamp_secs(),
+            };
+        }
+
+        // Auth: the load value drives routing, so it must come from the
+        // registered key. An unsigned/forged heartbeat is not acknowledged
+        // and its load is ignored.
+        let public_key = self
+            .service
+            .router_manager()
+            .solver_public_key(&request.node_id);
+        let Some(public_key) = public_key else {
+            warn!(
+                node_id = %request.node_id,
+                "Heartbeat from solver with no registered key - ignored"
+            );
+            return HeartbeatResponse {
+                acknowledged: false,
+                server_timestamp: current_timestamp_secs(),
+            };
+        };
+        if !verify_heartbeat_signature(&request, &public_key) {
+            warn!(
+                node_id = %request.node_id,
+                "Heartbeat signature verification failed - load ignored"
             );
             return HeartbeatResponse {
                 acknowledged: false,

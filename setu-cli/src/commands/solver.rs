@@ -100,32 +100,54 @@ pub async fn handle(action: crate::SolverAction, _config: &Config) -> Result<()>
             // Create HTTP client
             let client = HttpRegistrationClient::new(&router_host, router_port);
             
-            // Decode public key
-            let public_key_bytes = hex::decode(&keypair.public_key)?;
-            
-            // Create registration message to sign
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-            let message = format!(
-                "Register Solver: {}:{}:{}",
-                keypair.node_id,
-                keypair.account_address,
-                timestamp
-            );
-            
-            // TODO: Sign the message with private key
-            // For now, use empty signature
-            let signature = vec![];
-            
-            // Create registration request
+            // The key file holds an Ed25519 keypair; the secp256k1 ownership
+            // key is derived from it with a domain-separated hash, mirroring
+            // the validator CLI.
+            let ed_private_bytes = hex::decode(&keypair.private_key)?;
+            if ed_private_bytes.len() != 32 {
+                anyhow::bail!(
+                    "Solver key file must contain a 32-byte Ed25519 private key (got {})",
+                    ed_private_bytes.len()
+                );
+            }
+            let mut seed_hasher = blake3::Hasher::new();
+            seed_hasher.update(b"SETU_CLI_SECP_KEY_V1:");
+            seed_hasher.update(&ed_private_bytes);
+            let secp_seed = seed_hasher.finalize();
+            let secp_signing_key = k256::ecdsa::SigningKey::from_slice(secp_seed.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Failed to derive secp256k1 key: {e}"))?;
+            let secp_public_key = secp_signing_key
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec();
+
+            // Build the registration and sign it with the derived secp key.
+            let mut registration = setu_types::SolverRegistration::new(
+                keypair.node_id.clone(),
+                network_address.clone(),
+                network_port,
+                keypair.account_address.clone(),
+                secp_public_key.clone(),
+                vec![],
+            )
+            .with_capacity(capacity)
+            .with_shard(shard.clone().unwrap_or_default())
+            .with_resources(resources.clone());
+            {
+                use k256::ecdsa::signature::Signer;
+                let digest = setu_types::hash_utils::setu_hash(&registration.signing_message());
+                let sig: k256::ecdsa::Signature = secp_signing_key.sign(&digest);
+                registration.signature = sig.to_bytes().to_vec();
+            }
+
             let request = RegisterSolverRequest {
                 solver_id: keypair.node_id.clone(),
                 address: network_address.clone(),
                 port: network_port,
                 account_address: keypair.account_address.clone(),
-                public_key: public_key_bytes,
-                signature,
+                public_key: secp_public_key,
+                signature: registration.signature,
                 capacity,
                 shard_id: shard.clone(),
                 assigned_shard: None, // Auto-assigned by validator

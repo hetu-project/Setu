@@ -127,12 +127,21 @@ impl<H: RegistrationHandler> Clone for RegistrationServer<H> {
 pub struct RegistrationClient {
     network: Network,
     peer_id: PeerId,
+    /// secp256k1 secret used to sign heartbeats (optional; the HTTP solver
+    /// client signs directly, this covers the anemo path).
+    signing_key: Option<Vec<u8>>,
 }
 
 impl RegistrationClient {
     /// Create a new registration client
     pub fn new(network: Network, peer_id: PeerId) -> Self {
-        Self { network, peer_id }
+        Self { network, peer_id, signing_key: None }
+    }
+
+    /// Attach the solver's secp256k1 secret so heartbeats are signed.
+    pub fn with_signing_key(mut self, secret: Vec<u8>) -> Self {
+        self.signing_key = Some(secret);
+        self
     }
     
     /// Send RPC request and get response
@@ -210,11 +219,20 @@ impl RegistrationClient {
             .unwrap()
             .as_secs();
         
-        let request = HeartbeatRequest {
+        let mut request = HeartbeatRequest {
             node_id,
             current_load,
             timestamp,
+            signature: Vec::new(),
         };
+        if let Some(secret) = &self.signing_key {
+            use k256::ecdsa::{signature::Signer, SigningKey};
+            if let Ok(signing_key) = SigningKey::from_slice(secret) {
+                let digest = setu_types::hash_utils::setu_hash(&request.signing_message());
+                let sig: k256::ecdsa::Signature = signing_key.sign(&digest);
+                request.signature = sig.to_bytes().to_vec();
+            }
+        }
         
         let response = self.send_request(RpcRequest::Heartbeat(request)).await?;
         

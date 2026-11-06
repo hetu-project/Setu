@@ -162,12 +162,71 @@ impl SolverRegistration {
         self
     }
     
-    /// Verify the registration signature
-    pub fn verify_signature(&self) -> bool {
-        // TODO: Implement actual ECDSA signature verification
-        // Message format: "Register Solver: {solver_id}:{account_address}:{timestamp}"
-        !self.signature.is_empty() && !self.public_key.is_empty()
+    /// Deterministic signing message binding the claimed identity.
+    ///
+    /// Domain-separated and length-prefixed (same pattern as governance
+    /// registrations): every field an attacker could swap (id, address, port,
+    /// account, capacity) is committed. Capability fields (`shard_id`,
+    /// `assigned_shard`, `resources`, `permitted_subnets`) are intentionally
+    /// excluded: they are mutable/validator-assigned after registration.
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"SETU_REGISTER_SOLVER_V1");
+        extend_len_prefixed(&mut msg, self.solver_id.as_bytes());
+        extend_len_prefixed(&mut msg, self.address.as_bytes());
+        msg.extend_from_slice(&self.port.to_le_bytes());
+        extend_len_prefixed(&mut msg, self.account_address.as_bytes());
+        extend_len_prefixed(&mut msg, self.public_key.as_slice());
+        msg.extend_from_slice(&self.capacity.to_le_bytes());
+        msg
     }
+
+    /// Verify the secp256k1 ownership signature over [`Self::signing_message`].
+    ///
+    /// Fails closed: a missing/malformed signature or public key is rejected.
+    /// The previous implementation accepted ANY non-empty signature, so anyone
+    /// could register arbitrary solver identities (task interception).
+    pub fn verify_signature(&self) -> bool {
+        use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+        if self.signature.len() != 64 || self.public_key.len() != 65 {
+            return false;
+        }
+        let verifying_key = match VerifyingKey::from_sec1_bytes(&self.public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        let signature = match Signature::from_slice(&self.signature) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        let digest = crate::hash_utils::setu_hash(&self.signing_message());
+        verifying_key.verify(&digest, &signature).is_ok()
+    }
+
+    /// Sign the registration with a 32-byte secp256k1 private key.
+    pub fn sign(&mut self, private_key: &[u8]) -> Result<(), String> {
+        use k256::ecdsa::{signature::Signer, SigningKey};
+
+        if private_key.len() != 32 {
+            return Err(format!(
+                "Invalid private key length: expected 32, got {}",
+                private_key.len()
+            ));
+        }
+        let signing_key = SigningKey::from_slice(private_key)
+            .map_err(|e| format!("Invalid signing key: {e}"))?;
+        let digest = crate::hash_utils::setu_hash(&self.signing_message());
+        let sig: k256::ecdsa::Signature = signing_key.sign(&digest);
+        self.signature = sig.to_bytes().to_vec();
+        Ok(())
+    }
+}
+
+/// Length-prefix `bytes` into `msg` so concatenated fields are unambiguous.
+fn extend_len_prefixed(msg: &mut Vec<u8>, bytes: &[u8]) {
+    msg.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    msg.extend_from_slice(bytes);
 }
 
 // ========== Unregistration ==========

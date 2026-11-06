@@ -15,6 +15,8 @@ setu-vlc = { path = "../crates/setu-vlc" }
 setu-rpc = { path = "../setu-rpc" }
 setu-enclave = { path = "../crates/setu-enclave", features = ["move-vm"] }
 setu-keys = { path = "../crates/setu-keys" }
+k256 = { version = "0.13", features = ["ecdsa"] }
+blake3 = "1.5"
 setu-transport = { path = "../crates/setu-transport" }
 
 # Async runtime

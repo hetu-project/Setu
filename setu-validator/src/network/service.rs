@@ -1253,6 +1253,7 @@ impl ValidatorNetworkService {
             shard_id: request.shard_id.clone(),
             assigned_shard: request.assigned_shard,
             resources: request.resources.clone(),
+            public_key: request.public_key.clone(),
             status: "active".to_string(),
             registered_at: current_timestamp_secs(),
         };
@@ -1290,6 +1291,7 @@ impl ValidatorNetworkService {
             request.assigned_shard,
             request.resources.clone(),
             permitted_subnets,
+            request.public_key.clone(),
         );
 
         // Consume channel to avoid memory leak (sync HTTP doesn't use it)
@@ -2294,13 +2296,32 @@ mod tests {
     }
 
     fn sample_solver_request(solver_id: &str) -> setu_rpc::RegisterSolverRequest {
+        use k256::ecdsa::SigningKey;
+        let sk = SigningKey::from_slice(&[42u8; 32]).expect("fixed test key");
+        let pk = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        let mut reg = setu_types::SolverRegistration::new(
+            solver_id.to_string(),
+            "127.0.0.1".to_string(),
+            9001,
+            "0xtest".to_string(),
+            pk,
+            vec![],
+        )
+        .with_capacity(100)
+        .with_shard("shard-0")
+        .with_resources(vec!["ETH".to_string()]);
+        reg.sign(&[42u8; 32]).expect("sign test request");
         setu_rpc::RegisterSolverRequest {
             solver_id: solver_id.to_string(),
             address: "127.0.0.1".to_string(),
             port: 9001,
             account_address: "0xtest".to_string(),
-            public_key: vec![],
-            signature: vec![],
+            public_key: reg.public_key,
+            signature: reg.signature,
             capacity: 100,
             shard_id: Some("shard-0".to_string()),
             assigned_shard: None,
@@ -2496,6 +2517,86 @@ mod tests {
 
         assert!(response.success);
         assert_eq!(service.solver_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_requires_valid_signature() {
+        use k256::ecdsa::{signature::Signer, SigningKey};
+
+        let service = create_test_service();
+        let handler = service.registration_handler();
+        handler
+            .register_solver(sample_solver_request("solver-hb"))
+            .await;
+
+        // Signed by the registered key (the fixture uses [42u8; 32]).
+        let signing_key = SigningKey::from_slice(&[42u8; 32]).unwrap();
+        let mut good = setu_rpc::HeartbeatRequest {
+            node_id: "solver-hb".to_string(),
+            current_load: Some(7),
+            timestamp: 123,
+            signature: Vec::new(),
+        };
+        let digest = setu_types::hash_utils::setu_hash(&good.signing_message());
+        let sig: k256::ecdsa::Signature = signing_key.sign(&digest);
+        good.signature = sig.to_bytes().to_vec();
+
+        let response = handler.heartbeat(good).await;
+        assert!(response.acknowledged, "valid heartbeat must be acknowledged");
+        assert_eq!(
+            service
+                .router_manager()
+                .get_solver("solver-hb")
+                .unwrap()
+                .current_load,
+            7
+        );
+
+        // Signed by a different key: load must not change.
+        let mut forged = setu_rpc::HeartbeatRequest {
+            node_id: "solver-hb".to_string(),
+            current_load: Some(999),
+            timestamp: 124,
+            signature: Vec::new(),
+        };
+        let other = SigningKey::from_slice(&[43u8; 32]).unwrap();
+        let digest = setu_types::hash_utils::setu_hash(&forged.signing_message());
+        let sig: k256::ecdsa::Signature = other.sign(&digest);
+        forged.signature = sig.to_bytes().to_vec();
+
+        let response = handler.heartbeat(forged).await;
+        assert!(!response.acknowledged);
+        assert_eq!(
+            service
+                .router_manager()
+                .get_solver("solver-hb")
+                .unwrap()
+                .current_load,
+            7,
+            "forged heartbeat must not change load"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_solver_rejects_invalid_signature() {
+        let service = create_test_service();
+        let handler = service.registration_handler();
+
+        // Well-formed but wrong signature must be rejected cryptographically.
+        let mut forged = sample_solver_request("solver-forged");
+        forged.signature = vec![0u8; 64];
+        let response = handler.register_solver(forged).await;
+        assert!(!response.success);
+        assert_eq!(response.assigned_id, None);
+        assert!(response.message.contains("Invalid registration signature"));
+        assert_eq!(service.solver_count(), 0);
+
+        // The pre-fix stub accepted any non-empty bytes.
+        let mut empty = sample_solver_request("solver-empty");
+        empty.signature = vec![];
+        let response = handler.register_solver(empty).await;
+        assert!(!response.success);
+        assert_eq!(service.solver_count(), 0);
     }
 
     #[tokio::test]
