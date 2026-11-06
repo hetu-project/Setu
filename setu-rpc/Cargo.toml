@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 # Workspace dependencies
 setu-types = { path = "../types" }
+blake3 = "1.5"
+k256 = { version = "0.13", features = ["ecdsa"] }
 
 # Anemo for RPC
 anemo = { workspace = true }

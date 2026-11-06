@@ -1253,6 +1253,7 @@ impl ValidatorNetworkService {
             shard_id: request.shard_id.clone(),
             assigned_shard: request.assigned_shard,
             resources: request.resources.clone(),
+            public_key: request.public_key.clone(),
             status: "active".to_string(),
             registered_at: current_timestamp_secs(),
         };
@@ -1290,6 +1291,7 @@ impl ValidatorNetworkService {
             request.assigned_shard,
             request.resources.clone(),
             permitted_subnets,
+            request.public_key.clone(),
         );
 
         // Consume channel to avoid memory leak (sync HTTP doesn't use it)
@@ -2515,6 +2517,64 @@ mod tests {
 
         assert!(response.success);
         assert_eq!(service.solver_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_requires_valid_signature() {
+        use k256::ecdsa::{signature::Signer, SigningKey};
+
+        let service = create_test_service();
+        let handler = service.registration_handler();
+        handler
+            .register_solver(sample_solver_request("solver-hb"))
+            .await;
+
+        // Signed by the registered key (the fixture uses [42u8; 32]).
+        let signing_key = SigningKey::from_slice(&[42u8; 32]).unwrap();
+        let mut good = setu_rpc::HeartbeatRequest {
+            node_id: "solver-hb".to_string(),
+            current_load: Some(7),
+            timestamp: 123,
+            signature: Vec::new(),
+        };
+        let digest = setu_types::hash_utils::setu_hash(&good.signing_message());
+        let sig: k256::ecdsa::Signature = signing_key.sign(&digest);
+        good.signature = sig.to_bytes().to_vec();
+
+        let response = handler.heartbeat(good).await;
+        assert!(response.acknowledged, "valid heartbeat must be acknowledged");
+        assert_eq!(
+            service
+                .router_manager()
+                .get_solver("solver-hb")
+                .unwrap()
+                .current_load,
+            7
+        );
+
+        // Signed by a different key: load must not change.
+        let mut forged = setu_rpc::HeartbeatRequest {
+            node_id: "solver-hb".to_string(),
+            current_load: Some(999),
+            timestamp: 124,
+            signature: Vec::new(),
+        };
+        let other = SigningKey::from_slice(&[43u8; 32]).unwrap();
+        let digest = setu_types::hash_utils::setu_hash(&forged.signing_message());
+        let sig: k256::ecdsa::Signature = other.sign(&digest);
+        forged.signature = sig.to_bytes().to_vec();
+
+        let response = handler.heartbeat(forged).await;
+        assert!(!response.acknowledged);
+        assert_eq!(
+            service
+                .router_manager()
+                .get_solver("solver-hb")
+                .unwrap()
+                .current_load,
+            7,
+            "forged heartbeat must not change load"
+        );
     }
 
     #[tokio::test]

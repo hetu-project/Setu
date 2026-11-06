@@ -62,6 +62,8 @@ pub struct SolverConnection {
     /// Subnets this solver is permitted to serve.
     /// Empty = universal solver (can serve any subnet).
     pub permitted_subnets: Vec<SubnetId>,
+    /// secp256k1 ownership key from registration; used to verify heartbeats.
+    pub public_key: Vec<u8>,
 }
 
 impl SolverConnection {
@@ -76,6 +78,7 @@ impl SolverConnection {
             assigned_shard: None,
             resources: vec![],
             permitted_subnets: vec![],
+            public_key: Vec::new(),
         }
     }
     
@@ -96,6 +99,11 @@ impl SolverConnection {
     
     pub fn with_permitted_subnets(mut self, subnets: Vec<SubnetId>) -> Self {
         self.permitted_subnets = subnets;
+        self
+    }
+
+    pub fn with_public_key(mut self, public_key: Vec<u8>) -> Self {
+        self.public_key = public_key;
         self
     }
     
@@ -196,6 +204,7 @@ impl RouterManager {
         assigned_shard: Option<u16>,
         resources: Vec<String>,
         permitted_subnets: Vec<SubnetId>,
+        public_key: Vec<u8>,
     ) {
         info!(
             solver_id = %solver_id,
@@ -226,6 +235,9 @@ impl RouterManager {
         if !permitted_subnets.is_empty() {
             connection = connection.with_permitted_subnets(permitted_subnets);
         }
+        if !public_key.is_empty() {
+            connection = connection.with_public_key(public_key);
+        }
         
         self.solver_registry.write().insert(solver_id.clone(), connection);
         self.solver_channels.write().insert(solver_id.clone(), channel);
@@ -237,6 +249,15 @@ impl RouterManager {
         );
     }
     
+    /// The registered secp256k1 public key of a solver, if known.
+    pub fn solver_public_key(&self, solver_id: &str) -> Option<Vec<u8>> {
+        self.solver_registry
+            .read()
+            .get(solver_id)
+            .map(|s| s.public_key.clone())
+            .filter(|k| !k.is_empty())
+    }
+
     /// Unregister a solver
     pub fn unregister_solver(&self, solver_id: &str) {
         info!(solver_id = %solver_id, "Unregistering solver");
@@ -694,6 +715,7 @@ mod tests {
             None,
             vec![],
             vec![permitted],
+            vec![],
         );
 
         let mut transfer = create_test_transfer("tx-1").with_subnet("gaming-subnet");
@@ -743,6 +765,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![],  // empty = universal
+            vec![],  // public_key
         );
         
         let subnet_a = create_test_subnet(1);
@@ -773,6 +796,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![subnet_a.clone()],  // only subnet_a
+            vec![],  // public_key
         );
         
         // Dedicated solver should only permit subnet_a
@@ -801,6 +825,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![],
+            vec![],
         );
         
         // solver-2: dedicated to subnet_a
@@ -813,6 +838,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![subnet_a.clone()],
+            vec![],
         );
         
         // solver-3: dedicated to subnet_b
@@ -825,6 +851,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![subnet_b.clone()],
+            vec![],
         );
         
         // Transfer for subnet_a should route to solver-1 or solver-2 (not solver-3)
@@ -858,6 +885,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![subnet_a.clone()],
+            vec![],
         );
         
         // Transfer for subnet_b should fail (no solver permits it)
@@ -884,6 +912,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![],
+            vec![],
         );
         manager.register_solver_with_affinity(
             "solver-2".to_string(),
@@ -892,6 +921,7 @@ mod tests {
             tx2,
             None,
             None, // assigned_shard
+            vec![],
             vec![],
             vec![],
         );
@@ -926,6 +956,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![],
+            vec![],
         );
         
         // solver-2: dedicated to subnet_b only
@@ -938,6 +969,7 @@ mod tests {
             None, // assigned_shard
             vec![],
             vec![subnet_b.clone()],
+            vec![],
         );
         
         // Try to use solver-2 for subnet_a (should fall back to solver-1)

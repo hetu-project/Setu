@@ -88,6 +88,8 @@ pub struct SolverInfo {
     /// Assigned shard ID (numeric, for shard-based routing)
     pub assigned_shard: Option<u16>,
     pub resources: Vec<String>,
+    /// secp256k1 ownership key from registration (heartbeat verification).
+    pub public_key: Vec<u8>,
     pub status: String,
     pub registered_at: u64,
 }
@@ -110,6 +112,7 @@ impl SolverInfo {
             shard_id: reg.shard_id.clone(),
             assigned_shard: reg.assigned_shard,
             resources: reg.resources.clone(),
+            public_key: reg.public_key.clone(),
             status: status.to_string(),
             registered_at: timestamp_ms / 1000,
         }

@@ -135,6 +135,34 @@ pub struct HeartbeatRequest {
     pub current_load: Option<u32>,
     /// Timestamp
     pub timestamp: u64,
+    /// secp256k1 signature over [`Self::signing_message`] made with the
+    /// solver's registered key. Prevents load spoofing for other solvers.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl HeartbeatRequest {
+    /// Deterministic signing message binding sender, timestamp and load.
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"SETU_SOLVER_HEARTBEAT_V1");
+        extend_len_prefixed(&mut msg, self.node_id.as_bytes());
+        msg.extend_from_slice(&self.timestamp.to_le_bytes());
+        match self.current_load {
+            Some(load) => {
+                msg.push(1u8);
+                msg.extend_from_slice(&load.to_le_bytes());
+            }
+            None => msg.push(0u8),
+        }
+        msg
+    }
+}
+
+/// Length-prefix `bytes` into `msg` so concatenated fields are unambiguous.
+fn extend_len_prefixed(msg: &mut Vec<u8>, bytes: &[u8]) {
+    msg.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    msg.extend_from_slice(bytes);
 }
 
 /// Heartbeat response

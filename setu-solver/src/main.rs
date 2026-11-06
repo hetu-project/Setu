@@ -124,7 +124,7 @@ fn load_key_info(
     capacity: u32,
     shard_id: Option<&str>,
     resources: &[String],
-) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+) -> anyhow::Result<(String, Vec<u8>, Vec<u8>, Vec<u8>)> {
     info!("Loading keypair from: {}", key_file);
 
     let keypair = load_keypair(key_file)?;
@@ -166,7 +166,8 @@ fn load_key_info(
     info!("  Account Address: {}", account_address);
     info!("  Public Key: {}", hex::encode(&public_key));
 
-    Ok((account_address, public_key, signature))
+    let signing_secret = secp_signing_key.to_bytes().to_vec();
+    Ok((account_address, public_key, signature, signing_secret))
 }
 
 #[tokio::main]
@@ -218,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
     info!("└─────────────────────────────────────────────────────────────┘");
 
     // Load key info if key file is provided
-    let (account_address, public_key, signature) = if let Some(ref key_file) = config.key_file {
+    let (account_address, public_key, signature, signing_secret) = if let Some(ref key_file) = config.key_file {
         match load_key_info(
             key_file,
             &config.solver_id,
@@ -236,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
                     "0x0000000000000000000000000000000000000000".to_string(),
                     vec![],
                     vec![],
+                    vec![],
                 )
             }
         }
@@ -244,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         warn!("Using placeholder values for registration");
         (
             "0x0000000000000000000000000000000000000000".to_string(),
+            vec![],
             vec![],
             vec![],
         )
@@ -264,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
         account_address: account_address.clone(),
         public_key: public_key.clone(),
         signature: signature.clone(),
+        signing_secret: signing_secret.clone(),
     };
     
     let network_client = Arc::new(SolverNetworkClient::new(network_config));
